@@ -10,12 +10,28 @@ const AGENT_PLATFORM_PRICING_URL: &str =
     "https://cloud.google.com/gemini-enterprise-agent-platform/generative-ai/pricing?hl=en";
 const CACHE_TTL_SECONDS: i64 = 24 * 60 * 60;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ApiPricing {
     pub model: String,
     pub input: f64,
     pub output: f64,
     pub cached: f64,
+    #[serde(default)]
+    pub is_custom: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CustomPricingEntry {
+    pub model: String,
+    pub input: f64,
+    pub output: f64,
+    pub cached: f64,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,6 +51,8 @@ pub async fn get_api_pricing() -> Result<ApiPricingSnapshot, String> {
         if now.saturating_sub(cached.fetched_at) < CACHE_TTL_SECONDS && !cached.prices.is_empty() {
             cached.stale = false;
             cached.warning = None;
+            let custom = read_custom_pricing();
+            apply_custom_pricing(&mut cached, &custom);
             return Ok(cached);
         }
     }
@@ -78,7 +96,10 @@ pub async fn get_api_pricing() -> Result<ApiPricingSnapshot, String> {
             warning: (!warnings.is_empty()).then(|| warnings.join("；")),
         };
         write_cache(&snapshot);
-        return Ok(snapshot);
+        let mut snapshot_with_custom = snapshot;
+        let custom = read_custom_pricing();
+        apply_custom_pricing(&mut snapshot_with_custom, &custom);
+        return Ok(snapshot_with_custom);
     }
 
     if let Some(mut cached) = read_cache() {
@@ -88,10 +109,12 @@ pub async fn get_api_pricing() -> Result<ApiPricingSnapshot, String> {
         } else {
             format!("{}；继续使用本地缓存", warnings.join("；"))
         });
+        let custom = read_custom_pricing();
+        apply_custom_pricing(&mut cached, &custom);
         return Ok(cached);
     }
 
-    Ok(ApiPricingSnapshot {
+    let mut fallback = ApiPricingSnapshot {
         prices: Vec::new(),
         fetched_at: now,
         stale: true,
@@ -101,7 +124,10 @@ pub async fn get_api_pricing() -> Result<ApiPricingSnapshot, String> {
         } else {
             warnings.join("；")
         }),
-    })
+    };
+    let custom = read_custom_pricing();
+    apply_custom_pricing(&mut fallback, &custom);
+    Ok(fallback)
 }
 
 async fn fetch_page(client: &reqwest::Client, url: &str) -> Result<String, String> {
@@ -123,9 +149,75 @@ fn cache_path() -> Option<PathBuf> {
     Some(root.join("api_pricing.json"))
 }
 
+pub fn custom_pricing_path() -> Option<PathBuf> {
+    let root = std::env::var_os("ABV_DATA_DIR")
+        .filter(|path| !path.to_string_lossy().trim().is_empty())
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".antigravity_tools")))?;
+    Some(root.join("custom_pricing.json"))
+}
+
+pub fn get_custom_pricing_file_path() -> Result<String, String> {
+    custom_pricing_path()
+        .map(|p| p.to_string_lossy().to_string())
+        .ok_or_else(|| "无法获取自定义价格配置文件路径".to_string())
+}
+
+pub fn read_custom_pricing() -> Vec<CustomPricingEntry> {
+    let Some(path) = custom_pricing_path() else {
+        return Vec::new();
+    };
+    let Ok(bytes) = fs::read(path) else {
+        return Vec::new();
+    };
+    serde_json::from_slice(&bytes).unwrap_or_default()
+}
+
+pub fn save_custom_pricing(entries: Vec<CustomPricingEntry>) -> Result<(), String> {
+    let path = custom_pricing_path().ok_or_else(|| "无法获取数据目录路径".to_string())?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let bytes = serde_json::to_vec_pretty(&entries).map_err(|e| e.to_string())?;
+    fs::write(path, bytes).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn apply_custom_pricing(snapshot: &mut ApiPricingSnapshot, custom_entries: &[CustomPricingEntry]) {
+    for entry in custom_entries {
+        if !entry.enabled {
+            continue;
+        }
+        let lower = entry.model.trim().to_ascii_lowercase();
+        if lower.is_empty() {
+            continue;
+        }
+        if let Some(existing) = snapshot
+            .prices
+            .iter_mut()
+            .find(|p| p.model.trim().to_ascii_lowercase() == lower)
+        {
+            existing.input = entry.input;
+            existing.output = entry.output;
+            existing.cached = entry.cached;
+            existing.is_custom = true;
+        } else {
+            snapshot.prices.push(ApiPricing {
+                model: entry.model.trim().to_string(),
+                input: entry.input,
+                output: entry.output,
+                cached: entry.cached,
+                is_custom: true,
+            });
+        }
+    }
+}
+
 pub fn cached_pricing() -> Option<ApiPricingSnapshot> {
     let mut snapshot = read_cache()?;
     snapshot.stale = Utc::now().timestamp().saturating_sub(snapshot.fetched_at) >= CACHE_TTL_SECONDS;
+    let custom = read_custom_pricing();
+    apply_custom_pricing(&mut snapshot, &custom);
     Some(snapshot)
 }
 
@@ -209,6 +301,7 @@ fn parse_gemini_section(section: &str, model: &str, today: NaiveDate) -> Option<
         input: input?,
         output: output?,
         cached: cached.unwrap_or(0.0),
+        is_custom: false,
     })
 }
 
@@ -242,6 +335,7 @@ fn parse_agent_platform_prices(html: &str, today: NaiveDate) -> Vec<ApiPricing> 
             input: 0.0,
             output: 0.0,
             cached: 0.0,
+            is_custom: false,
         });
         match kind.as_str() {
             "input" if entry.input == 0.0 => entry.input = value,
@@ -381,5 +475,63 @@ mod tests {
         assert_eq!(prices.len(), 1);
         assert_eq!(prices[0].model, "gemini-3.9-flash");
         assert_eq!(prices[0].output, 4.0);
+    }
+
+    #[test]
+    fn applies_custom_pricing_overrides_and_additions() {
+        let mut snapshot = ApiPricingSnapshot {
+            prices: vec![
+                ApiPricing {
+                    model: "gemini-3.8-flash".into(),
+                    input: 0.5,
+                    output: 2.0,
+                    cached: 0.05,
+                    is_custom: false,
+                },
+            ],
+            fetched_at: 1000,
+            stale: false,
+            source: "test".into(),
+            warning: None,
+        };
+
+        let custom_entries = vec![
+            CustomPricingEntry {
+                model: "gemini-3.8-flash".into(),
+                input: 0.1,
+                output: 0.4,
+                cached: 0.01,
+                enabled: true,
+            },
+            CustomPricingEntry {
+                model: "deepseek-v3".into(),
+                input: 0.14,
+                output: 0.28,
+                cached: 0.014,
+                enabled: true,
+            },
+            CustomPricingEntry {
+                model: "disabled-model".into(),
+                input: 1.0,
+                output: 2.0,
+                cached: 0.1,
+                enabled: false,
+            },
+        ];
+
+        apply_custom_pricing(&mut snapshot, &custom_entries);
+
+        assert_eq!(snapshot.prices.len(), 2);
+        let flash = snapshot.prices.iter().find(|p| p.model == "gemini-3.8-flash").unwrap();
+        assert_eq!(flash.input, 0.1);
+        assert_eq!(flash.output, 0.4);
+        assert!(flash.is_custom);
+
+        let deepseek = snapshot.prices.iter().find(|p| p.model == "deepseek-v3").unwrap();
+        assert_eq!(deepseek.input, 0.14);
+        assert_eq!(deepseek.output, 0.28);
+        assert!(deepseek.is_custom);
+
+        assert!(snapshot.prices.iter().all(|p| p.model != "disabled-model"));
     }
 }

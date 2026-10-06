@@ -609,3 +609,29 @@ pub async fn get_custom_models_file_path() -> Result<String, String> {
     crate::modules::custom_models::get_custom_models_file_path()
         .map(|p| p.to_string_lossy().to_string())
 }
+
+/// 读取自定义模型单价配置
+#[tauri::command]
+pub async fn get_custom_pricing(
+) -> Result<Vec<crate::modules::api_pricing::CustomPricingEntry>, String> {
+    tokio::task::spawn_blocking(crate::modules::api_pricing::read_custom_pricing)
+        .await
+        .map_err(|e| format!("读取自定义价格失败: {}", e))
+}
+
+/// 保存自定义模型单价配置
+#[tauri::command]
+pub async fn save_custom_pricing(
+    entries: Vec<crate::modules::api_pricing::CustomPricingEntry>,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || crate::modules::api_pricing::save_custom_pricing(entries))
+        .await
+        .map_err(|e| format!("保存自定义价格失败: {}", e))?
+}
+
+/// 获取自定义模型价格配置文件绝对路径
+#[tauri::command]
+pub async fn get_custom_pricing_file_path() -> Result<String, String> {
+    crate::modules::api_pricing::get_custom_pricing_file_path()
+}
+

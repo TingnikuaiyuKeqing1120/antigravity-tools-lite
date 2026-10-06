@@ -55,10 +55,23 @@ pub fn project(summary: &LocalTokenUsageSummary, pricing: Option<&ApiPricingSnap
     }
 }
 
-fn normalized(model: &str) -> String {
-    // The native model ID uses -n for the same API model, e.g. gemini-3.8-flash-n.
+fn strip_route_suffix(model: &str) -> &str {
+    let m = model.trim();
+    for suffix in ["-n", "-tiered", "-high", "-medium", "-low", "-extra-low", "-thinking"] {
+        if let Some(stripped) = m.strip_suffix(suffix) {
+            return stripped;
+        }
+    }
+    m
+}
+
+fn canonical_model_key(model: &str) -> String {
     let model = model.to_ascii_lowercase();
-    model.strip_suffix("-n").unwrap_or(&model).chars().filter(|c| c.is_ascii_alphanumeric()).collect()
+    strip_route_suffix(&model).chars().filter(|c| c.is_ascii_alphanumeric()).collect()
+}
+
+fn exact_model_key(model: &str) -> String {
+    model.to_ascii_lowercase().chars().filter(|c| c.is_ascii_alphanumeric()).collect()
 }
 
 pub(crate) fn estimate(models: &[LocalTokenModel], prices: &[ApiPricing]) -> (Option<f64>, usize) {
@@ -67,14 +80,25 @@ pub(crate) fn estimate(models: &[LocalTokenModel], prices: &[ApiPricing]) -> (Op
     let mut unpriced = 0;
     for model in models {
         if model.input_tokens == 0 && model.output_tokens == 0 && model.cached_tokens == 0 { continue; }
-        let name = normalized(&model.model);
-        let mut matching = prices.iter().filter(|price| normalized(&price.model) == name);
-        let price = matching.next();
-        // Do not guess prices from a substring or silently pick an ambiguous rate.
-        if let Some(price) = price.filter(|price| matching.next().is_none() && [price.input, price.output, price.cached].iter().all(|rate| rate.is_finite() && *rate >= 0.0)) {
+        
+        let exact = exact_model_key(&model.model);
+        let mut exact_matches = prices.iter().filter(|price| exact_model_key(&price.model) == exact);
+        let first_exact = exact_matches.next();
+        let price = if let Some(p) = first_exact.filter(|p| exact_matches.next().is_none() && [p.input, p.output, p.cached].iter().all(|rate| rate.is_finite() && *rate >= 0.0)) {
+            Some(p)
+        } else {
+            let canon = canonical_model_key(&model.model);
+            let mut canon_matches = prices.iter().filter(|price| canonical_model_key(&price.model) == canon);
+            let first_canon = canon_matches.next();
+            first_canon.filter(|p| canon_matches.next().is_none() && [p.input, p.output, p.cached].iter().all(|rate| rate.is_finite() && *rate >= 0.0))
+        };
+
+        if let Some(price) = price {
             usd += (model.input_tokens as f64 * price.input + model.output_tokens as f64 * price.output + model.cached_tokens as f64 * price.cached) / 1_000_000.0;
             priced += 1;
-        } else { unpriced += 1; }
+        } else {
+            unpriced += 1;
+        }
     }
     (if priced > 0 || unpriced == 0 { Some(usd) } else { None }, unpriced)
 }
@@ -83,7 +107,7 @@ pub(crate) fn estimate(models: &[LocalTokenModel], prices: &[ApiPricing]) -> (Op
 mod tests {
     use super::*;
     fn model(name: &str) -> LocalTokenModel { LocalTokenModel { model: name.into(), input_tokens: 1_000_000, output_tokens: 100_000, cached_tokens: 2_000_000, total_tokens: 3_100_000, request_count: 3 } }
-    fn price() -> ApiPricing { ApiPricing { model: "gemini-3.8-flash".into(), input: 0.75, output: 3.75, cached: 0.075 } }
+    fn price() -> ApiPricing { ApiPricing { model: "gemini-3.8-flash".into(), input: 0.75, output: 3.75, cached: 0.075, is_custom: false } }
     #[test]
     fn cached_usage_stays_visible_during_refresh_but_never_crosses_midnight() {
         let day = chrono::NaiveDate::from_ymd_opt(2026, 10, 5).unwrap();
@@ -109,5 +133,27 @@ mod tests {
     fn partial_estimate_retains_the_unpriced_count() {
         let (usd, missing) = estimate(&[model("gemini-3.8-flash"), model("unknown")], &[price()]);
         assert!((usd.unwrap() - 1.275).abs() < 1e-9); assert_eq!(missing, 1);
+    }
+    #[test]
+    fn routing_and_tiering_variants_inherit_base_model_rate() {
+        let (usd_tiered, missing_tiered) = estimate(&[model("gemini-3.8-flash-tiered")], &[price()]);
+        assert!((usd_tiered.unwrap() - 1.275).abs() < 1e-9);
+        assert_eq!(missing_tiered, 0);
+
+        let (usd_high, missing_high) = estimate(&[model("gemini-3.8-flash-high")], &[price()]);
+        assert!((usd_high.unwrap() - 1.275).abs() < 1e-9);
+        assert_eq!(missing_high, 0);
+    }
+    #[test]
+    fn exact_custom_price_takes_precedence_over_fallback() {
+        let mut custom = price();
+        custom.model = "gemini-3.8-flash-tiered".into();
+        custom.input = 0.1;
+        custom.output = 1.0;
+        custom.cached = 0.01;
+        custom.is_custom = true;
+        let (usd, missing) = estimate(&[model("gemini-3.8-flash-tiered")], &[price(), custom]);
+        assert!((usd.unwrap() - 0.22).abs() < 1e-9);
+        assert_eq!(missing, 0);
     }
 }

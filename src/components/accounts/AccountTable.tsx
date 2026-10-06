@@ -48,6 +48,7 @@ import { cn } from '../../utils/cn';
 
 import { useConfigStore } from '../../stores/useConfigStore';
 import { QuotaItem } from './QuotaItem';
+import AccountModelsModal from './AccountModelsModal';
 import { getDisplayQuotaModels } from '../../config/modelConfig';
 import { categorizeModel, getModelProtectionKey } from '../../utils/modelCategory';
 import { getValidationBlockedStatusLabel } from './accountValidationStatus';
@@ -287,6 +288,7 @@ function AccountRowContent({
     const { t } = useTranslation();
     const { config } = useConfigStore();
     const validationBlockedLabel = getValidationBlockedStatusLabel(account.validation_blocked_reason, t);
+    const [showModelsModal, setShowModelsModal] = useState(false);
 
     // 解析周配额项 (当处于 weekly 视图时)
     const weeklyItems = useMemo(() => {
@@ -423,6 +425,25 @@ function AccountRowContent({
                     </div>
                 ) : (
                     <div className="flex flex-col gap-1.5 py-0.5 w-full">
+                        {quotaWindow !== 'weekly' && (
+                            <div className="flex items-center justify-between text-[10px] text-gray-400 dark:text-gray-500 px-0.5 pb-0.5">
+                                <span className="font-medium">5h 常用</span>
+                                {(account.quota?.models?.length || 0) > 0 && (
+                                    <button
+                                        type="button"
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            setShowModelsModal(true);
+                                        }}
+                                        className="text-blue-600 hover:text-blue-700 dark:text-blue-400 font-medium hover:underline transition-colors cursor-pointer flex items-center gap-0.5"
+                                        title={t('account_models.view_all_title', '查看该账号 Google 实际开通的全部模型与端点')}
+                                    >
+                                        <span>全部 {account.quota?.models?.length} 模型</span>
+                                        <span>›</span>
+                                    </button>
+                                )}
+                            </div>
+                        )}
                         {quotaWindow === 'weekly' && weeklyItems.length > 0 ? (
                             weeklyItems.map((item) => (
                                 <QuotaItem
@@ -452,6 +473,7 @@ function AccountRowContent({
                                         percentage={modelData?.percentage || 0}
                                         resetTime={modelData?.reset_time}
                                         isProtected={Boolean(config?.quota_protection?.enabled && isModelProtected(account.protected_models, model.protectedKey))}
+                                        isAvailable={model.isAvailable !== false}
                                         Icon={model.Icon || Bot}
                                     />
                                 );
@@ -528,6 +550,15 @@ function AccountRowContent({
                     </button>
                 </div>
             </td>
+
+            {showModelsModal && (
+                <AccountModelsModal
+                    isOpen={showModelsModal}
+                    onClose={() => setShowModelsModal(false)}
+                    account={account}
+                    onAccountRefreshed={onRefresh}
+                />
+            )}
         </>
     );
 }

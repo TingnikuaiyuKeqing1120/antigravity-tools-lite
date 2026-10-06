@@ -376,6 +376,7 @@ export interface DisplayQuotaModelItem {
     protectedKey: string;
     Icon: any;
     data?: ModelQuota;
+    isAvailable?: boolean;
 }
 
 /**
@@ -435,7 +436,8 @@ export function getDisplayQuotaModels(
             label,
             protectedKey,
             Icon,
-            data: rawModel || ({ name: canonKey, percentage: 0 } as ModelQuota),
+            data: rawModel,
+            isAvailable: Boolean(rawModel),
         });
     }
 

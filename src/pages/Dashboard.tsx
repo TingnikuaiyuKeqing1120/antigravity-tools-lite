@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Activity, BarChart3, CalendarDays, Cpu, Database, DollarSign, Info, LayoutDashboard, MessageSquare, PieChart, RefreshCw } from 'lucide-react';
+import { Activity, BarChart3, CalendarDays, Coins, Cpu, Database, DollarSign, Info, LayoutDashboard, MessageSquare, PieChart, RefreshCw } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { request as invoke } from '../utils/request';
 import { showToast } from '../components/common/ToastContainer';
 import { estimateApiCost, findModelPricing } from '../utils/modelPricing';
+import CustomPricingModal from '../components/pricing/CustomPricingModal';
 
 interface LocalTokenTotals {
     input_tokens: number;
@@ -250,6 +251,7 @@ function TokenCard({
     detail,
     locale,
     tooltipContent,
+    actionButton,
 }: {
     label: string;
     value: number;
@@ -259,6 +261,7 @@ function TokenCard({
     detail?: string;
     locale: string;
     tooltipContent?: React.ReactNode;
+    actionButton?: React.ReactNode;
 }) {
     const { t } = useTranslation();
     return (
@@ -270,12 +273,15 @@ function TokenCard({
                     </span>
                     {label}
                 </div>
-                {tooltipContent && (
-                    <span className="flex items-center gap-0.5 cursor-pointer rounded-full bg-amber-50 px-1.5 py-0.5 text-[9px] font-medium text-amber-600 transition-colors group-hover:bg-amber-100 dark:bg-amber-900/30 dark:text-amber-300">
-                        <Info className="h-2.5 w-2.5" />
-                        <span>{t('local_dashboard.cost_details')}</span>
-                    </span>
-                )}
+                <div className="flex items-center gap-1">
+                    {actionButton}
+                    {tooltipContent && (
+                        <span className="flex items-center gap-0.5 cursor-pointer rounded-full bg-amber-50 px-1.5 py-0.5 text-[9px] font-medium text-amber-600 transition-colors group-hover:bg-amber-100 dark:bg-amber-900/30 dark:text-amber-300">
+                            <Info className="h-2.5 w-2.5" />
+                            <span>{t('local_dashboard.cost_details')}</span>
+                        </span>
+                    )}
+                </div>
             </div>
             <div className="text-xl font-bold tracking-tight text-gray-900 dark:text-base-content" title={displayValue || formatTokens(value, locale)}>
                 {displayValue || compactTokens(value, locale)}
@@ -315,6 +321,7 @@ function Dashboard() {
     const [error, setError] = useState<string | null>(null);
     const [hoveredPoint, setHoveredPoint] = useState<TokenChartPoint | null>(null);
     const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null);
+    const [showPricingModal, setShowPricingModal] = useState(false);
     const fetchInFlight = useRef(false);
 
     const fetchUsage = useCallback(async (notify = false) => {
@@ -584,6 +591,20 @@ function Dashboard() {
                         color="bg-amber-50 text-amber-600 dark:bg-amber-900/20 dark:text-amber-300"
                         icon={DollarSign}
                         locale={locale}
+                        actionButton={
+                            <button
+                                type="button"
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    setShowPricingModal(true);
+                                }}
+                                className="flex items-center gap-1 rounded-full bg-amber-100/70 px-1.5 py-0.5 text-[9px] font-medium text-amber-700 hover:bg-amber-200 dark:bg-amber-900/40 dark:text-amber-300 dark:hover:bg-amber-900/60 transition-colors cursor-pointer"
+                                title={t('custom_pricing.config_button', '配置单价')}
+                            >
+                                <Coins className="h-2.5 w-2.5" />
+                                <span>{t('custom_pricing.config_button', '配置单价')}</span>
+                            </button>
+                        }
                         tooltipContent={
                             <div className="space-y-2">
                                 <div className="flex items-center justify-between border-b border-gray-100 pb-1.5 dark:border-base-200">
@@ -620,11 +641,23 @@ function Dashboard() {
                                         </div>
                                     )}
                                 </div>
-                                {apiCost.unpricedModels > 0 && (
-                                    <div className="border-t border-gray-100 pt-1 text-[10px] text-gray-400 dark:border-base-200">
-                                        {t('local_dashboard.unpriced_models_hint', { count: apiCost.unpricedModels })}
-                                    </div>
-                                )}
+                                <div className="border-t border-gray-100 pt-1.5 text-[10px] text-gray-400 dark:border-base-200 flex items-center justify-between">
+                                    <span>
+                                        {apiCost.unpricedModels > 0
+                                            ? t('local_dashboard.unpriced_models_hint', { count: apiCost.unpricedModels })
+                                            : t('custom_pricing.calc_hint', '基于官方抓取与自定义单价')}
+                                    </span>
+                                    <button
+                                        type="button"
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            setShowPricingModal(true);
+                                        }}
+                                        className="text-amber-600 hover:text-amber-700 dark:text-amber-400 font-medium hover:underline cursor-pointer"
+                                    >
+                                        {t('custom_pricing.manage', '管理单价 ›')}
+                                    </button>
+                                </div>
                             </div>
                         }
                     />
@@ -882,6 +915,14 @@ function Dashboard() {
                     </div>
                 </section>
             </div>
+
+            {showPricingModal && (
+                <CustomPricingModal
+                    isOpen={showPricingModal}
+                    onClose={() => setShowPricingModal(false)}
+                    onPricingUpdated={fetchPricing}
+                />
+            )}
         </div>
     );
 }

@@ -10,13 +10,15 @@ interface QuotaItemProps {
     percentage: number;
     resetTime?: string;
     isProtected?: boolean;
+    isAvailable?: boolean;
     className?: string;
     Icon?: React.ComponentType<{ size?: number; className?: string }>;
 }
 
-export function QuotaItem({ label, title, percentage, resetTime, isProtected, className, Icon }: QuotaItemProps) {
+export function QuotaItem({ label, title, percentage, resetTime, isProtected, isAvailable = true, className, Icon }: QuotaItemProps) {
     const { t } = useTranslation();
     const getBgColorClass = (p: number) => {
+        if (!isAvailable) return 'bg-transparent';
         const color = getQuotaColor(p);
         switch (color) {
             case 'success': return 'bg-emerald-500';
@@ -27,6 +29,7 @@ export function QuotaItem({ label, title, percentage, resetTime, isProtected, cl
     };
 
     const getTextColorClass = (p: number) => {
+        if (!isAvailable) return 'text-gray-400 dark:text-gray-600';
         const color = getQuotaColor(p);
         switch (color) {
             case 'success': return 'text-emerald-600 dark:text-emerald-400';
@@ -39,24 +42,28 @@ export function QuotaItem({ label, title, percentage, resetTime, isProtected, cl
     return (
         <div className={cn(
             "relative h-[22px] flex items-center px-1.5 rounded-md overflow-hidden border border-gray-100/50 dark:border-white/5 bg-gray-50/30 dark:bg-white/5 group/quota",
+            !isAvailable && "opacity-60",
             className
         )}
             title={title || (typeof label === 'string' ? label : undefined)}
         >
             {/* Background Progress Bar */}
-            <div
-                className={cn(
-                    "absolute inset-y-0 left-0 transition-all duration-700 ease-out opacity-15 dark:opacity-20",
-                    getBgColorClass(percentage)
-                )}
-                style={{ width: `${percentage}%` }}
-            />
+            {isAvailable && (
+                <div
+                    className={cn(
+                        "absolute inset-y-0 left-0 transition-all duration-700 ease-out opacity-15 dark:opacity-20",
+                        getBgColorClass(percentage)
+                    )}
+                    style={{ width: `${percentage}%` }}
+                />
+            )}
 
             {/* Content */}
             <div className="relative z-10 w-full flex items-center text-[10px] font-mono leading-none gap-1.5">
                 {/* Model Name */}
                 <span className={cn(
-                    "flex-1 min-w-0 text-gray-500 dark:text-gray-400 font-bold truncate text-left flex items-center gap-1"
+                    "flex-1 min-w-0 text-gray-500 dark:text-gray-400 font-bold truncate text-left flex items-center gap-1",
+                    !isAvailable && "line-through decoration-gray-300 dark:decoration-gray-700"
                 )} title={title || (typeof label === 'string' ? label : undefined)}>
                     {Icon && <Icon size={12} className="shrink-0" />}
                     {label}
@@ -64,7 +71,9 @@ export function QuotaItem({ label, title, percentage, resetTime, isProtected, cl
 
                 {/* Reset Time */}
                 <div className="w-[58px] flex justify-start shrink-0">
-                    {resetTime ? (
+                    {!isAvailable ? (
+                        <span className="text-gray-300 dark:text-gray-600 scale-90">-</span>
+                    ) : resetTime ? (
                         <span className="flex items-center gap-0.5 font-medium text-amber-600 dark:text-amber-400 truncate">
                             <Clock className="w-2.5 h-2.5 shrink-0" />
                             {formatTimeRemaining(resetTime)}
@@ -77,13 +86,13 @@ export function QuotaItem({ label, title, percentage, resetTime, isProtected, cl
                 {/* Percentage */}
                 <span className={cn(
                     "text-right font-bold transition-colors flex items-center justify-end gap-0.5 shrink-0",
-                    "w-[28px]",
+                    isAvailable ? "w-[28px]" : "w-[36px] text-[9px] font-normal",
                     getTextColorClass(percentage)
                 )}>
-                    {isProtected && (
+                    {isProtected && isAvailable && (
                         <span title={t('accounts.quota_protected')}><Lock className="w-2.5 h-2.5 text-amber-500" /></span>
                     )}
-                    {percentage}%
+                    {isAvailable ? `${percentage}%` : t('account_models.not_available', '未开通')}
                 </span>
             </div>
         </div>

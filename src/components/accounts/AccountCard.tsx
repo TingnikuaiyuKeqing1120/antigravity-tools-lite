@@ -1,10 +1,11 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { ArrowRightLeft, RefreshCw, Trash2, Lock, Ban, Diamond, Gem, Circle, Sparkles, Tag, Clock, GripVertical, BrainCircuit, CheckCircle2 } from 'lucide-react';
 import { Account } from '../../types/account';
 import { cn } from '../../utils/cn';
 import { useTranslation } from 'react-i18next';
 import { useConfigStore } from '../../stores/useConfigStore';
 import { QuotaItem } from './QuotaItem';
+import AccountModelsModal from './AccountModelsModal';
 import { getDisplayQuotaModels } from '../../config/modelConfig';
 import { getValidationBlockedStatusLabel } from './accountValidationStatus';
 
@@ -46,6 +47,8 @@ function AccountCard({
     const { config } = useConfigStore();
     const isDisabled = Boolean(account.disabled);
     const validationBlockedLabel = getValidationBlockedStatusLabel(account.validation_blocked_reason, t);
+    const [showModelsModal, setShowModelsModal] = useState(false);
+    const totalActualModels = account.quota?.models?.length || 0;
 
     // Use the prop directly from parent component
     const isCurrent = propIsCurrent;
@@ -233,7 +236,26 @@ function AccountCard({
                         ))}
                     </div>
                 ) : (
-                    <div className="grid grid-cols-1 gap-2 content-start my-auto">
+                    <div className="grid grid-cols-1 gap-1.5 content-start my-auto">
+                        <div className="flex items-center justify-between text-[10px] text-gray-400 dark:text-gray-500 px-0.5 pb-0.5">
+                            <span className="font-medium">
+                                {quotaWindow === 'weekly' ? t('accounts.weekly_pool', '周额度') : '5h 常用'}
+                            </span>
+                            {totalActualModels > 0 && (
+                                <button
+                                    type="button"
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        setShowModelsModal(true);
+                                    }}
+                                    className="text-blue-600 hover:text-blue-700 dark:text-blue-400 font-medium hover:underline transition-colors cursor-pointer flex items-center gap-0.5"
+                                    title={t('account_models.view_all_title', '查看该账号 Google 实际开通的全部模型与端点')}
+                                >
+                                    <span>全部 {totalActualModels} 模型</span>
+                                    <span>›</span>
+                                </button>
+                            )}
+                        </div>
                         {displayModels.map((model) => (
                             <QuotaItem
                                 key={model.id}
@@ -241,6 +263,7 @@ function AccountCard({
                                 percentage={model.data?.percentage || 0}
                                 resetTime={model.data?.reset_time}
                                 isProtected={isModelProtected(model.protectedKey)}
+                                isAvailable={model.isAvailable !== false}
                                 Icon={model.Icon}
                             />
                         ))}
@@ -297,6 +320,15 @@ function AccountCard({
                     </button>
                 </div>
             </div>
+
+            {showModelsModal && (
+                <AccountModelsModal
+                    isOpen={showModelsModal}
+                    onClose={() => setShowModelsModal(false)}
+                    account={account}
+                    onAccountRefreshed={onRefresh}
+                />
+            )}
         </div >
     );
 }

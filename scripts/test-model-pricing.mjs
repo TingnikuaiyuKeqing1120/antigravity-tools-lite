@@ -23,3 +23,14 @@ test('unknown cost differs from known zero and no activity',()=>{
  assert.deepEqual(estimateApiCost([model(price.model)],{prices:[{...price,input:0,output:0,cached:0}]}),{usd:0,pricedModels:1,unpricedModels:0});
  assert.deepEqual(estimateApiCost([],null),{usd:0,pricedModels:0,unpricedModels:0});
 });
+test('routing and tiering variants inherit base model pricing',()=>{
+ assert.equal(findModelPricing('gemini-2.5-flash-tiered',snapshot),price);
+ assert.equal(findModelPricing('Gemini 2.5 Flash-High',snapshot),price);
+ assert.equal(findModelPricing('gemini-2.5-flash-thinking',snapshot),price);
+});
+test('exact custom pricing override takes precedence over base model fallback',()=>{
+ const customTieredPrice={model:'gemini-2.5-flash-tiered',input:.1,output:1,cached:.01,is_custom:true};
+ const customSnapshot={prices:[price,customTieredPrice]};
+ assert.equal(findModelPricing('gemini-2.5-flash-tiered',customSnapshot),customTieredPrice);
+ assert.equal(findModelPricing('gemini-2.5-flash',customSnapshot),price);
+});

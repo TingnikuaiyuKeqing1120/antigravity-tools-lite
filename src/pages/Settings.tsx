@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Check, Clock3, Database, FolderOpen, Globe2, HardDrive, Monitor, Moon, RefreshCw, Sun } from 'lucide-react';
+import { Check, Clock3, Coins, Database, FolderOpen, Globe2, HardDrive, Monitor, Moon, RefreshCw, Sun } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useConfigStore } from '../stores/useConfigStore';
 import { AppConfig } from '../types/config';
@@ -10,6 +10,7 @@ import UpdateSettings from '../components/settings/UpdateSettings';
 import DesktopSettings from '../components/settings/DesktopSettings';
 import ModelDisplaySettings from '../components/settings/ModelDisplaySettings';
 import CustomModelSettings from '../components/settings/CustomModelSettings';
+import CustomPricingModal from '../components/pricing/CustomPricingModal';
 import { AutoSwitchSettings } from '../components/autoSwitch/AutoSwitch';
 import SettingsNavigation, { SETTINGS_SECTIONS, SettingsSection } from '../components/settings/SettingsNavigation';
 import '../components/settings/SettingsLayout.css';
@@ -27,6 +28,7 @@ function Settings() {
     const { config, loading, error, loadConfig, saveConfig } = useConfigStore();
     const [dataDirPath, setDataDirPath] = useState('~/.antigravity_tools');
     const [section, setSection] = useState<SettingsSection>('general');
+    const [showCustomPricingModal, setShowCustomPricingModal] = useState(false);
     const layout = useRef<HTMLDivElement>(null);
     const contentScroller = useRef<HTMLDivElement>(null);
 
@@ -288,7 +290,34 @@ function Settings() {
                 {/* 1. 卡片与列表展示模型 */}
                 <ModelDisplaySettings embedded />
 
-                {/* 2. 定时后台刷新与多端同步 */}
+                {/* 2. 模型计价规则与自定义单价 */}
+                <section className="rounded-2xl border border-gray-200/80 bg-white p-5 sm:p-6 shadow-xs dark:border-slate-800 dark:bg-slate-900/80">
+                    <div className="flex flex-wrap items-center justify-between gap-4">
+                        <div className="flex items-start gap-3">
+                            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-amber-50 text-amber-600 dark:bg-amber-400/10 dark:text-amber-300">
+                                <Coins className="h-5 w-5" />
+                            </span>
+                            <div>
+                                <h3 className="text-base font-semibold text-gray-900 dark:text-gray-100">
+                                    {t('custom_pricing.settings_title', '模型 API 计价与自定义单价')}
+                                </h3>
+                                <p className="mt-0.5 text-xs text-gray-500 dark:text-gray-400 leading-relaxed">
+                                    {t('custom_pricing.settings_desc', '自定义各模型输入、输出及缓存 Token 单价。支持为衍生通道（如 -tiered、-n）或第三方模型配置自定义费率。')}
+                                </p>
+                            </div>
+                        </div>
+                        <button
+                            type="button"
+                            onClick={() => setShowCustomPricingModal(true)}
+                            className="flex items-center gap-1.5 rounded-xl bg-amber-600 px-4 py-2 text-xs font-medium text-white shadow-xs hover:bg-amber-700 transition-colors cursor-pointer"
+                        >
+                            <Coins className="h-4 w-4" />
+                            <span>{t('custom_pricing.open_modal', '配置模型单价')}</span>
+                        </button>
+                    </div>
+                </section>
+
+                {/* 3. 定时后台刷新与多端同步 */}
                 <section className="rounded-2xl border border-gray-200/80 bg-white shadow-xs dark:border-slate-800 dark:bg-slate-900/80 divide-y divide-gray-100 dark:divide-slate-800">
                     <div className="p-5 sm:p-6">
                         <div className="flex items-start justify-between gap-4">
@@ -383,6 +412,13 @@ function Settings() {
                     </section>
                 ))}
             </div>
+
+            {showCustomPricingModal && (
+                <CustomPricingModal
+                    isOpen={showCustomPricingModal}
+                    onClose={() => setShowCustomPricingModal(false)}
+                />
+            )}
         </div>
     );
 }
