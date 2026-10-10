@@ -22,6 +22,7 @@ permissions:
 
 jobs:
   recipe:
+    if: github.repository == 'anglee0323/antigravity-tools-lite' || github.repository == 'anglee0323/agy-switch'
     runs-on: macos-15
     timeout-minutes: 15
     env:

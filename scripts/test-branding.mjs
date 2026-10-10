@@ -25,7 +25,7 @@ test('source app, npm, Rust and both languages agree on the new identity', () =>
   assert.equal(conf.identifier, 'com.lbjlaq.antigravity-tools-lite');
   assert.match(read('src-tauri/src/modules/account.rs').toString(), /const DATA_DIR: &str = "\.antigravity_tools"/);
   for (const platform of ['linux', 'windows']) assert.equal(json(`src-tauri/tauri.${platform}.conf.json`).app.windows[0].title, 'to-agy');
-  assert.deepEqual(conf.plugins.updater.endpoints, ['https://github.com/anglee0323/agy-switch/releases/latest/download/latest.json']);
+  assert.deepEqual(conf.plugins.updater.endpoints, ['https://github.com/TingnikuaiyuKeqing1120/antigravity-tools-lite/releases/latest/download/latest.json']);
 });
 test('new desktop packages and signed updater formats use the same brand', () => {
   const version = '4.9.0';

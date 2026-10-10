@@ -5,7 +5,7 @@ set -euo pipefail
 [[ $# == 1 ]] || { echo 'Usage: test-linux-package.sh PACKAGE.deb' >&2; exit 2; }
 task_package="$(realpath "$1")"
 task_name="$(dpkg-deb -f "$task_package" Package)"
-[[ "$task_name" == agy-switch ]]
+[[ "$task_name" == "to-agy" || "$task_name" == "agy-switch" ]]
 if dpkg-query -W -f='${Status}' "$task_name" 2>/dev/null | grep -q 'install ok installed'; then
   echo 'Refusing an existing installation' >&2; exit 1
 fi
