@@ -528,6 +528,7 @@ mod tests {
     #[test]
     fn applies_custom_pricing_overrides_and_additions() {
         let mut snapshot = ApiPricingSnapshot {
+            parser_revision: PARSER_REVISION,
             prices: vec![
                 ApiPricing {
                     model: "gemini-3.8-flash".into(),

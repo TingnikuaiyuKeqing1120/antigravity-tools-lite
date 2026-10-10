@@ -1,7 +1,7 @@
 {
-  "version": "4.10.2",
-  "name": "agy-switch",
-  "description": "Local Antigravity account switching and usage dashboard",
+  "version": "4.10.3",
+  "name": "to-agy",
+  "description": "to-agy: Antigravity account switching and usage dashboard",
   "type": "module",
   "private": true,
   "scripts": {

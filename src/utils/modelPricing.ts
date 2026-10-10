@@ -11,16 +11,14 @@ export interface ModelPricing {
 // 2. Canonical route fallback strips routing / tiering suffixes (-n, -tiered, -high, -medium, -low, -extra-low)
 //    and maps Claude thinking and exp-a variants, so that variants inherit their base model's pricing.
 // 3. Independent architectures (e.g. flash-lite vs flash) do not conflate.
-const ROUTE_SUFFIX_REGEX = /-(n|tiered|high|medium|low|extra-low)$/i;
-
 const exactNormalize = (model: string) => {
     const name = model.toLowerCase();
     const mapped = name === 'gemini-3.8-flash-exp-a' ? 'gemini-3.8-flash' : name;
     return mapped.replace(/[^a-z0-9]/g, '');
 };
 
-const canonicalNormalize = (model: string) => {
-    let name = model.toLowerCase().trim().replace(ROUTE_SUFFIX_REGEX, '');
+const normalize = (model: string) => {
+    let name = model.toLowerCase().trim().replace(/-(n|tiered|high|medium|low|extra-low|thinking)$/i, '');
     if (name === 'gemini-3.8-flash-exp-a') name = 'gemini-3.8-flash';
     const cleaned = name.replace(/[^a-z0-9]/g, '');
     return cleaned.replace(/^(claude(?:opus|sonnet|haiku)\d+)thinking$/, '$1');
@@ -29,21 +27,28 @@ const canonicalNormalize = (model: string) => {
 export function findModelPricing(model: string, snapshot: { prices: ModelPricing[] } | null): ModelPricing | undefined {
     if (!snapshot || !model) return undefined;
 
-    // 1. Exact match first
     const exactTarget = exactNormalize(model);
-    const exactMatches = snapshot.prices.filter(entry => exactNormalize(entry.model) === exactTarget);
-    if (exactMatches.length === 1) {
-        const price = exactMatches[0];
+    const customMatches = snapshot.prices.filter(entry => entry.is_custom && exactNormalize(entry.model) === exactTarget);
+    if (customMatches.length === 1) {
+        const price = customMatches[0];
         return [price.input, price.output, price.cached].every(value => Number.isFinite(value) && value >= 0) ? price : undefined;
     }
-    if (exactMatches.length > 1) return undefined;
+    if (customMatches.length > 1) return undefined;
 
-    // 2. Canonical routing suffix fallback (-tiered, -n, -high, etc.)
-    const canonTarget = canonicalNormalize(model);
-    const canonMatches = snapshot.prices.filter(entry => canonicalNormalize(entry.model) === canonTarget);
-    if (canonMatches.length !== 1) return undefined;
-    const price = canonMatches[0];
-    return [price.input, price.output, price.cached].every(value => Number.isFinite(value) && value >= 0) ? price : undefined;
+    const target = normalize(model);
+    const matches = snapshot.prices.filter(entry => normalize(entry.model) === target);
+    if (matches.length === 1) {
+        const price = matches[0];
+        return [price.input, price.output, price.cached].every(value => Number.isFinite(value) && value >= 0) ? price : undefined;
+    }
+    if (matches.some(entry => entry.is_custom)) {
+        const exactMatches = matches.filter(entry => exactNormalize(entry.model) === exactTarget);
+        if (exactMatches.length === 1) {
+            const price = exactMatches[0];
+            return [price.input, price.output, price.cached].every(value => Number.isFinite(value) && value >= 0) ? price : undefined;
+        }
+    }
+    return undefined;
 }
 
 export function estimateApiCost(models: Array<{ model: string; input_tokens: number; output_tokens: number; cached_tokens: number }>, snapshot: { prices: ModelPricing[] } | null) {

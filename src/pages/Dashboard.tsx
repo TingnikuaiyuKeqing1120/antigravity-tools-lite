@@ -266,6 +266,7 @@ function TokenCard({
     unit,
     detail,
     hint,
+    locale,
     children,
     tooltipContent,
     actionButton,

@@ -3,7 +3,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "agy-switch",
+        "title": "to-agy",
         "width": 1024,
         "height": 700,
         "transparent": false,

@@ -143,7 +143,7 @@ mod tests {
     }
     #[test]
     fn claude_thinking_alias_uses_exact_input_output_and_cache_rates() {
-        let price = ApiPricing { model: "Claude Opus 4.6".into(), input: 5.0, output: 25.0, cached: 0.5 };
+        let price = ApiPricing { model: "Claude Opus 4.6".into(), input: 5.0, output: 25.0, cached: 0.5, is_custom: false };
         for name in ["claude-opus-4-6-thinking", "Claude Opus 4.6 Thinking-n", "claude-opus-4.6"] {
             assert_eq!(estimate(&[model(name)], &[price.clone()]), (Some(8.5), 0));
         }

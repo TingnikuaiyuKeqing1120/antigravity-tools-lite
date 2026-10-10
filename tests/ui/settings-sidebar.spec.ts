@@ -94,7 +94,7 @@ test('keyboard navigation wraps and mounted hidden panels stay outside the tab o
   await page.getByRole('tab').first().focus(); await page.keyboard.press('ArrowLeft'); await expect(page.locator('#settings-tab-experimental')).toBeFocused(); await page.keyboard.press('Home'); await expect(page.locator('#settings-tab-general')).toBeFocused();
   await page.keyboard.press('Tab'); await expect(page.getByRole('tabpanel')).toBeFocused();
   for (let i = 0; i < 12; i++) { await page.keyboard.press('Tab'); expect(await page.evaluate(() => document.activeElement?.closest('[role="tabpanel"][hidden]') === null)).toBe(true); }
-  await expect(page.locator('[role="tabpanel"][hidden]')).toHaveCount(3);
+  await expect(page.locator('[role="tabpanel"][hidden]')).toHaveCount(4);
 });
 test('desktop preferences survive navigation and ordinary appearance saves', async ({ page }) => {
   const login = page.locator('#desktop-launch_at_login'); const dock = page.locator('#desktop-hide_dock_icon');

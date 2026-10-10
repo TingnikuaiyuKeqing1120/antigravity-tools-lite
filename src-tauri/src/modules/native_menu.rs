@@ -15,7 +15,7 @@ use tauri::Emitter;
 
 const WIDTH: f64 = 424.0;
 const FAMILY_GAP: f64 = 24.0;
-const BRAND: &str = "AntiGravity Switch";
+const BRAND: &str = "to-agy";
 const GITHUB: &str = "https://github.com/anglee0323/agy-switch";
 static OPEN: AtomicBool = AtomicBool::new(false);
 static GENERATION: AtomicU64 = AtomicU64::new(0);
