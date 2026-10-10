@@ -322,6 +322,20 @@ function TokenCard({
     );
 }
 
+interface DashboardDataCache {
+    usage: LocalTokenUsageSummary | null;
+    pricing: ApiPricingSnapshot | null;
+    lastUpdatedAt: number | null;
+}
+
+const getDashboardCache = (): DashboardDataCache => {
+    const g = globalThis as unknown as { __toAgyDashboardCache?: DashboardDataCache };
+    if (!g.__toAgyDashboardCache) {
+        g.__toAgyDashboardCache = { usage: null, pricing: null, lastUpdatedAt: null };
+    }
+    return g.__toAgyDashboardCache;
+};
+
 function Dashboard() {
     const config = useConfigStore(state => state.config);
     const visibleCards = dashboardCards(config?.dashboard?.cards);
@@ -341,27 +355,33 @@ function Dashboard() {
         '7d': t('local_dashboard.last_7_days'),
         '30d': t('local_dashboard.last_30_days'),
     };
-    const [usage, setUsage] = useState<LocalTokenUsageSummary | null>(null);
-    const [pricing, setPricing] = useState<ApiPricingSnapshot | null>(null);
+    const dashboardCache = getDashboardCache();
+    const [usage, setUsage] = useState<LocalTokenUsageSummary | null>(() => dashboardCache.usage);
+    const [pricing, setPricing] = useState<ApiPricingSnapshot | null>(() => dashboardCache.pricing);
     const [range, setRange] = useState<RangeKey>('today');
     const [modelViewMode, setModelViewMode] = useState<'tokens' | 'cost'>('cost');
     const [hoveredDonutModel, setHoveredDonutModel] = useState<string | null>(null);
-    const [loading, setLoading] = useState(true);
+    const [loading, setLoading] = useState(() => !dashboardCache.usage);
     const [error, setError] = useState<string | null>(null);
     const [hoveredPoint, setHoveredPoint] = useState<TokenChartPoint | null>(null);
-    const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null);
+    const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(() => dashboardCache.lastUpdatedAt);
     const [showPricingModal, setShowPricingModal] = useState(false);
     const fetchInFlight = useRef(false);
 
     const fetchUsage = useCallback(async (notify = false) => {
         if (fetchInFlight.current) return;
         fetchInFlight.current = true;
-        setLoading(true);
+        if (!dashboardCache.usage || notify) {
+            setLoading(true);
+        }
         setError(null);
         try {
             const result = await invoke<LocalTokenUsageSummary>('get_local_token_usage');
+            dashboardCache.usage = result;
             setUsage(result);
-            setLastUpdatedAt(Date.now());
+            const now = Date.now();
+            dashboardCache.lastUpdatedAt = now;
+            setLastUpdatedAt(now);
             if (notify) {
                 const dataTime = result.last_activity
                     ? t('local_dashboard.toast_data_time', { time: formatTime(result.last_activity * 1000, locale) })
@@ -376,17 +396,20 @@ function Dashboard() {
             fetchInFlight.current = false;
             setLoading(false);
         }
-    }, [locale, t]);
+    }, [dashboardCache, locale, t]);
 
     const fetchPricing = useCallback(async () => {
         try {
             const result = await invoke<ApiPricingSnapshot>('get_api_pricing');
+            dashboardCache.pricing = result;
             setPricing(result);
         } catch (fetchError) {
             console.warn('API pricing unavailable:', fetchError);
-            setPricing(null);
+            if (!dashboardCache.pricing) {
+                setPricing(null);
+            }
         }
-    }, []);
+    }, [dashboardCache]);
 
     useEffect(() => {
         fetchUsage();

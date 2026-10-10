@@ -4,12 +4,26 @@ import type { DashboardSnapshot } from '../utils/accountDashboard';
 import { request } from '../utils/request';
 import { isTauri } from '../utils/env';
 
+interface DashboardOverviewCache {
+    snapshot: DashboardSnapshot | null;
+    reserve: number | null;
+}
+
+const getOverviewCache = (): DashboardOverviewCache => {
+    const g = globalThis as unknown as { __toAgyOverviewCache?: DashboardOverviewCache };
+    if (!g.__toAgyOverviewCache) {
+        g.__toAgyOverviewCache = { snapshot: null, reserve: null };
+    }
+    return g.__toAgyOverviewCache;
+};
+
 /** Reads saved observations and policy only. Never refreshes remote quotas or
  * credentials, probes the running client's identity, or triggers switching. */
 export function useDashboardOverview(enabled: boolean) {
-    const [snapshot, setSnapshot] = useState<DashboardSnapshot | null>(null);
-    const [reserve, setReserve] = useState<number | null>(null);
-    const [loading, setLoading] = useState(true);
+    const cache = getOverviewCache();
+    const [snapshot, setSnapshot] = useState<DashboardSnapshot | null>(() => cache.snapshot);
+    const [reserve, setReserve] = useState<number | null>(() => cache.reserve);
+    const [loading, setLoading] = useState(() => !cache.snapshot);
     const [failed, setFailed] = useState(false);
     const [now, setNow] = useState(Date.now());
     const read = useRef<(() => Promise<void>) | null>(null);
@@ -26,8 +40,17 @@ export function useDashboardOverview(enabled: boolean) {
                 request<{ reserve_percentage: number }>('get_auto_switch_config'),
             ]);
             if (active) {
-                setSnapshot(data.status === 'fulfilled' ? data.value : null);
-                setReserve(policy.status === 'fulfilled' ? policy.value.reserve_percentage : null);
+                if (data.status === 'fulfilled') {
+                    cache.snapshot = data.value;
+                    setSnapshot(data.value);
+                } else {
+                    cache.snapshot = null;
+                    setSnapshot(null);
+                }
+                if (policy.status === 'fulfilled') {
+                    cache.reserve = policy.value.reserve_percentage;
+                    setReserve(policy.value.reserve_percentage);
+                }
                 setFailed(data.status === 'rejected');
                 setLoading(false);
                 setNow(Date.now());
@@ -35,10 +58,12 @@ export function useDashboardOverview(enabled: boolean) {
             busy = false;
             if (queued && active) { queued = false; void fetch(); }
         };
-        setSnapshot(null);
+        if (!cache.snapshot) {
+            setSnapshot(null);
+            setLoading(true);
+        }
         setFailed(false);
         setNow(Date.now());
-        setLoading(true);
         read.current = fetch;
         void fetch();
         const timer = window.setInterval(() => {
