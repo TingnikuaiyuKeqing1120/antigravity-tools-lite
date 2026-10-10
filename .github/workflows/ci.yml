@@ -244,7 +244,8 @@ jobs:
         run: |
           set -euo pipefail
           npm run tauri bundle -- --debug --bundles app
-          APP="src-tauri/target/debug/bundle/macos/agy-switch.app"
+          APP="$(find src-tauri/target/debug/bundle/macos -maxdepth 1 -name "*.app" | head -n 1)"
+          [[ -d "$APP" ]] || { echo "No .app bundle found in src-tauri/target/debug/bundle/macos"; exit 1; }
           [[ "$(lipo -archs "$APP/Contents/MacOS/agy-switch-desktop")" == "arm64" ]]
           node scripts/test-cli.mjs "$APP/Contents/MacOS/agy-switch-desktop"
           mkdir -p artifacts/macos-test
