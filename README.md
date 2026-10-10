@@ -1,154 +1,190 @@
-# Antigravity Tools Lite
+<div align="center">
+  <img src="branding/app-icon.png" width="88" height="88" alt="AntiGravity Switch icon">
+  <h1>AntiGravity Switch</h1>
+  <p>Manage your Antigravity accounts, switch accounts, and keep track of usage.</p>
+  <p><a href="README.zh-CN.md">简体中文</a> · <a href="#installation">Install</a> · <a href="https://github.com/anglee0323/agy-switch/releases/latest">Download</a> · <a href="docs/cli.md">CLI guide</a></p>
+</div>
 
-[简体中文](./README.zh-CN.md)
+## What it does
 
-A local desktop application for [Antigravity](https://antigravity.google). It manages the Google accounts used by the Antigravity app and its `agy` CLI, shows per-model quota with reset countdowns, and summarises locally recorded token usage together with an estimated API cost. Account and usage records are stored locally, and usage aggregation runs on the device. Google authorization, token refresh and quota queries use the network and the corresponding credentials; price synchronization also uses the network
+AntiGravity Switch brings your Antigravity accounts into one place. See which accounts have quota left, choose the one you want to use, and review token usage recorded on your machine. Use the desktop app, the menu bar or system tray, or the terminal—all share the same saved accounts.
 
-![Dashboard — Linux native WebKitGTK](docs/screenshots/4.7.9/linux-dashboard-light.png)
+- **Manage accounts:** add accounts, check quotas and reset times, edit remarks, reorder accounts, and disable unavailable ones.
+- **Switch quickly:** select an account from the app or quick dashboard. Optional smart switching selects a backup account when quota runs low.
+- **Understand usage:** see input, output and cached tokens, usage trends, and estimated API costs by model.
+- **Work from the terminal:** manage accounts, edit switching policies, sort candidates, and check for updates with keyboard controls or commands.
 
-Native Linux Tauri/WebKitGTK viewport, CI debug build `5be961d3`, English UI and synthetic example data; system window frame excluded. [Screenshot sources and platform limits](docs/screenshots/4.7.9/README.md)
+### Supported clients
 
-## Overview
+| Client | What AntiGravity Switch synchronizes |
+| --- | --- |
+| Antigravity desktop app | The selected account's desktop credentials |
+| Antigravity CLI (`agy`) | The native CLI session alongside desktop credentials; initialize the client first |
+| Antigravity IDE | The standalone IDE's account credentials |
+| Antigravity extension for VS Code | Extension credentials without restarting the VS Code host |
 
-- **Account management** — import accounts already present on the machine, switch the account Antigravity uses, annotate accounts with remarks, remove them again
-- **Quota overview** — per-model quota and reset time, grouped by PRO / ULTRA / FREE, with table and card views
-- **Usage dashboard** — token usage for today, yesterday, the last 3, 7 or 30 days, broken down per model, with an estimated API cost
-- **Quick dashboard** — inspect quotas from the menu bar or tray, with a separate action to activate an account
-- **Smart switching** — optional backup-account selection by priority or round robin, with activity checks and configurable thresholds; running tasks are not migrated
-- **One switch for both clients** — switching synchronizes the credentials used by Antigravity and an initialized `agy` CLI
-- **Local storage** — no project-operated proxy or credential relay service; local account and usage storage with direct Google authorization and quota requests
-- **Bilingual interface** — Simplified Chinese and English, light and dark themes, tray menu
+In smart-switch settings, choose Global Sync, Desktop App & CLI, Antigravity IDE, or VS Code Extension. Install and initialize the clients you use first. Compatibility depends on the installed client version and credential store; switching does not migrate running tasks. The management command `agy-switch` is separate from Google's `agy`.
 
-## Download
+<table>
+  <tr>
+    <td width="72%" valign="top"><strong>Usage dashboard</strong><br><img src="docs/screenshots/2026-10-06/dashboard-en.png" alt="Usage dashboard"></td>
+    <td width="28%" valign="top"><strong>macOS menu bar</strong><br><img src="docs/screenshots/2026-10-06/menu-bar-en.png" alt="macOS menu bar"></td>
+  </tr>
+</table>
 
-**[Latest release](https://github.com/anglee0323/antigravity-tools-lite/releases/latest)**
+<table>
+  <tr>
+    <td width="50%" valign="top"><strong>Account list</strong><br><img src="docs/screenshots/2026-10-06/accounts-list-en.png" alt="Account list"></td>
+    <td width="50%" valign="top"><strong>Account cards</strong><br><img src="docs/screenshots/2026-10-06/accounts-cards-en.png" alt="Account cards"></td>
+  </tr>
+</table>
 
-| Platform | Package | Installation |
+<table>
+  <tr>
+    <td width="50%" valign="top"><strong>Settings</strong><br><img src="docs/screenshots/2026-10-06/settings-en.png" alt="Settings"></td>
+    <td width="50%" valign="top"><strong>Terminal dashboard</strong><br><img src="docs/screenshots/2026-10-06/cli-en.png" alt="Terminal dashboard"></td>
+  </tr>
+</table>
+
+Menu bar usage and quotas are example data. Account remarks retain the language entered by the user. [Screenshot sources](docs/screenshots/2026-10-06/README.md)
+
+## Installation
+
+Download the package for your platform from **[GitHub Releases](https://github.com/anglee0323/agy-switch/releases/latest)**. The current release is **4.10.2**. The application is called AntiGravity Switch; the repository and terminal command are `agy-switch`.
+
+| Platform | Desktop package | Terminal access |
 | --- | --- | --- |
-| macOS (Apple Silicon) | `Antigravity-Tools-Lite-<version>-macos-arm64.zip` | Unpack, then move `Antigravity Tools Lite.app` to Applications |
-| Windows (x64) | `Antigravity-Tools-Lite-<version>-windows-x64-setup.exe` | NSIS installer, per-user installation |
-| Linux (x64) | `Antigravity-Tools-Lite-<version>-linux-amd64.deb` | `sudo apt install ./package.deb` |
+| macOS · Apple Silicon | Homebrew or macOS ARM64 ZIP | Included with Homebrew |
+| Windows · x64 | Windows x64 installer | Included in the installer; separate console ZIP available |
+| Linux · x64 | Linux AMD64 deb | Included in the deb; separate console tarball available |
 
-The release workflow does not configure Developer ID signing/notarization or Windows Authenticode signing. macOS or Windows may therefore warn about or block a downloaded package. Check its release source and checksum, and make any required trust decision yourself through the operating system's normal review flow. See [Apple's guidance](https://support.apple.com/en-gb/102445) and [Microsoft's app-reputation guidance](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/smartscreen-reputation). Homebrew does not remove these platform checks
+Intel Mac, Windows ARM and Linux ARM packages are not currently provided. Linux desktop packages use Ubuntu 22.04 as the build baseline. The Linux CLI runs without a display but still requires GTK3/WebKitGTK runtime libraries.
 
-**macOS distribution:** Complete ad-hoc signing fixes bundle integrity, but does not establish Apple trust. Actual Homebrew upgrade to v4.7.9 succeeded on Apple Silicon and preserved account files; Gatekeeper rejected the app and Brew CLI launch timed out. Developer ID signing and notarization are still required for normal trusted distribution.
+### macOS
 
-## Account management
-
-The **+** button offers three ways to add an account
-
-- **OAuth** — opens the browser, the account is added after you approve access with Google
-- **Refresh token** — paste a single token or a JSON array of tokens to import several accounts at once
-- **Import from this machine** — scans the system credential store, the Antigravity databases, installed plugins, the native agy session and the legacy CLI data directory (`~/.antigravity-agent`), then imports every account it finds
-
-![Accounts — Linux native WebKitGTK, synthetic data](docs/screenshots/4.7.9/linux-accounts-light.png)
-
-Each row provides four actions, each with a tooltip
-
-| Action | Effect |
-| --- | --- |
-| **Switch to this account** | Writes the selected account to Antigravity's credential store (or `state.vscdb` on builds older than 2.0) and synchronizes an initialized native agy session. A manual switch may close and restart Antigravity; save work first. Reopen the client and verify its account. If a partial update is reported, inspect both clients before retrying |
-| **Refresh quota** | Re-reads this account's per-model quota and reset times |
-| **Edit remark** | Stores a short label, up to 15 characters, to distinguish accounts |
-| **Delete** | Removes the account from this application |
-
-Rows can be sorted by quota reset time or by last use, reordered by dragging, and displayed as a table or as cards. Selecting several rows enables batch refresh and batch delete; the filter row narrows the list to All, PRO, ULTRA or FREE
-
-### Why the application is closed during a switch
-
-A single switch synchronizes the credential locations used by Antigravity and an initialized `agy` CLI. The application is closed during the switch because a running instance keeps the previous token in memory and writes it back when it refreshes, which would silently revert the switch. Start a new CLI command after switching; an already-running CLI command may retain its previous token
-
-On Antigravity builds older than 2.0 there is no credential entry to write; the application detects this and injects the token into the local `state.vscdb` database instead, while still synchronizing an initialized native agy session. Separate IDE-targeted switches keep their own database-only behavior
-
-Native agy sessions use `~/.gemini/antigravity-cli/antigravity-oauth-token` on all three platforms. Only an existing `antigravity-cli` directory is used; normal APP synchronization can create its first token file if needed. The APP and agy may share a system credential store, so a file-only update does not establish which account a new agy process will use. Use normal APP synchronization and verify the active identity in the client. Generic Google Gemini CLI files (`~/.gemini/oauth_creds.json` and `~/.gemini/google_accounts.json`) are neither created, changed nor deleted
-
-Session updates use atomic replacement and readback verification, with `0600` permissions on Unix. Modern, keyring-backed Linux APP switches restore the previous keyring credentials if session synchronization fails. A legacy APP database update is not rolled back and is reported as a partial update on session failure. On macOS/Windows, a session failure after the keyring update is reported as a partial update; check both clients before retrying
-
-## Usage dashboard
-
-The dashboard reads Antigravity's local conversation databases (`conversation.db`, `token_usage_archive.db`) and its archive directory, then aggregates the recorded usage on the device. Tools Lite does not upload conversation content or estimate unrecorded requests
-
-- **Date range** — today, yesterday, the last 3, 7 or 30 days; single-day ranges include an hourly chart
-- **Chart details** — pointing at a bar shows that hour's input, output and cached tokens, request count and estimated cost
-- **Summary cards** — total tokens, input tokens, output tokens, cache hit rate and estimated API cost
-- **Model usage and model details** — per-model token and estimated-cost breakdown, with a token/cost distribution chart
-
-Cost is estimated from Google's public Gemini pricing pages, which are fetched once a day and cached, with a built-in fallback table. Models without a known price are reported as unpriced instead of being counted as free
-
-## Quick dashboard
-
-On macOS, the native menu has three sections: today's local usage and estimated cost, aggregate remaining quota, and per-account quotas with explicit switch controls. Settings selects Gemini, Claude/GPT or both families, account labels, unavailable-account visibility and reset countdowns on hover, always or hidden. Aggregate percentages are equal-weight means, not summed tokens. The native menu opens from cached local data and updates in the background.
-
-Switching may close and restart Antigravity; save work first. Current identity is checked against the running standalone Mac app when available; the full application's selection and CLI `current` remain local records. Device-wide usage is not attributed to an account.
-
-Windows/Linux retain the shared WebView panel. Linux opens it from **Quick Dashboard** in the tray menu; the main window remains available without a tray. Native Mac login startup and multiple displays, and Windows GUI acceptance still require separate checks. See [panel behavior and platform limits](docs/menu-bar-dashboard.md).
-
-## Settings
-
-![Settings — Linux native WebKitGTK, light theme](docs/screenshots/4.7.9/linux-settings-light.png)
-
-<details>
-<summary>Dark theme — Linux native viewport</summary>
-
-![Settings — Linux native WebKitGTK, dark theme](docs/screenshots/4.7.9/linux-settings-dark.png)
-
-</details>
-
-These are native Linux viewports with synthetic data; Settings content below the captured area requires scrolling.
-
-- **Appearance and language** — follow the system, or choose light or dark; Simplified Chinese or English
-- **Background tasks** — how often account quotas refresh, and how often the active account is re-read from local Antigravity data
-- **Local data** — location of the application data (`~/.antigravity_tools/`), with a button to open the folder
-- **Startup and menu bar** — launch at login, background launch at login and hiding the Dock icon are all off by default; hiding the Dock icon is macOS-only
-- **Updates** — optional startup checks and a manual check in Settings; a new-version notice opens this repository’s official release page. Installer download and automatic installation are not implemented
-
-## Data handling
-
-| | |
-| --- | --- |
-| Read | Antigravity's local conversation databases and archives, which contain token counts, model names and timestamps |
-| Written | `~/.antigravity_tools/` for accounts, configuration and cached pricing, the operating system credential store, and the initialized native agy session when an account is switched |
-| Network | Google authorization, token refresh and quota queries use the required credentials; price synchronization also needs network access |
-| Service boundary | Tools Lite provides no credential relay service and does not upload conversation content |
-
-## Building from source
-
-See [Linux support](docs/linux.md) for Linux build and compatibility details.
-
-Node.js 22 or newer, a stable Rust toolchain and the platform build tools required by Tauri 2 are needed
-
-```bash
-npm ci
-npm run tauri dev       # development
-npm run build           # frontend only
-npm run tauri build     # macOS .app or Windows installer
-```
-
-Bundles are written to `src-tauri/target/release/bundle/`. Pushing a `v*` tag runs the release workflow, which builds macOS, Windows and Linux deb packages and attaches the results to the GitHub release
-
-## Smart account switching
-
-This default-off feature monitors real quotas and selects only allowed backup accounts. Settings supports priority order or round robin, with drag or keyboard reordering. **Wait for detected inactivity** uses recent activity observations before closing an affected client; **Switch at the threshold** can interrupt running work. Activity detection does not prove that every task has finished. The coordinator rechecks identity, fresh quota and the pending request before writing credentials; running generations are not migrated. Reopen the client and verify its account before continuing. See [setup, limits and verification](docs/low-quota-switching.md).
-
-## Relation to the upstream project
-
-This project is a focused fork of [lbjlaq/Antigravity-Manager](https://github.com/lbjlaq/Antigravity-Manager). Upstream provides a full toolkit, including a reverse proxy, an HTTP API, a Cloudflared tunnel, IP management and a Docker image. This fork keeps the account manager and the local usage dashboard, removes the proxy and web-mode parts of the codebase, and adds its own dashboard, bilingual interface, theme support and release tooling. The two projects are independent; use upstream if a proxy is required
-
-## License
-
-Based on [lbjlaq/Antigravity-Manager](https://github.com/lbjlaq/Antigravity-Manager) and distributed under the same [CC BY-NC-SA 4.0](./LICENSE) license. The license and the attribution requirements of the original project apply to any use, modification or redistribution
-
-## Command-line and Homebrew
-
-Tools Lite includes `agy-switch` for account management, cached quotas, local statistics and explicit switching. On macOS and Linux, the terminal menu also supports account labels, enable/disable, confirmed deletion and account addition through browser authorization or masked token entry. It is separate from Google’s `agy`; `current` is a local record and `quota` does not refresh live data. See [CLI usage](docs/cli.md).
-
-[v4.7.9](https://github.com/anglee0323/antigravity-tools-lite/releases/tag/v4.7.9) provides the single management command `agy-switch`. On Apple Silicon macOS, the cask in this repository installs the app and links its bundled command as `agy-switch`:
+Install the app and CLI with Homebrew:
 
 ```sh
-brew tap anglee0323/antigravity-tools-lite https://github.com/anglee0323/antigravity-tools-lite.git
-brew install --cask anglee0323/antigravity-tools-lite/antigravity-tools-lite
-agy-switch --version
-agy-switch --help
+brew tap anglee0323/agy-switch https://github.com/anglee0323/agy-switch.git
+brew install --cask anglee0323/agy-switch/agy-switch
 ```
 
-The recipe pins the published ZIP's verified SHA-256. Actual Homebrew upgrade to v4.7.9 with a custom app directory succeeded and retained account files; only `agy-switch` is linked. The public ZIP passed 14 isolated CLI checks, but the quarantined Brew command timed out and Gatekeeper rejected the app. Launch and uninstall acceptance remain separate. Keep a backup of an existing manually installed app and resolve any app-folder conflict yourself without deleting account data. Homebrew does not install Google's `agy`. See [Homebrew verification and limitations](docs/homebrew.md).
+Alternatively, download the **macOS ARM64 ZIP**, unzip it, and move the app into Applications. [Homebrew installation and upgrades](docs/homebrew.md)
+
+### Windows
+
+Download and run the **Windows x64 installer** (`agy-switch-<version>-windows-x64-setup.exe`). It supports English and Simplified Chinese and installs for the current user.
+
+For terminal use only, extract the **Windows x64 console ZIP**, open PowerShell in that folder, and run:
+
+```powershell
+.\agy-switch.exe
+```
+
+[Windows installation and troubleshooting](docs/windows.md)
+
+### Linux
+
+Download the **Linux AMD64 deb**, then install it using the actual filename:
+
+```sh
+sudo apt install ./agy-switch-4.10.2-linux-amd64.deb
+agy-switch-desktop       # desktop app
+agy-switch              # terminal dashboard
+```
+
+For terminal use only, download the **Linux AMD64 console tarball**. Desktop tray support depends on your desktop environment. [Linux dependencies and setup](docs/linux.md)
+
+**System trust checks:** the current macOS release has no Developer ID signing or notarization, and the Windows installer has no Authenticode signing. Your system may block launch or display security prompts. Homebrew does not bypass these checks. Package SHA-256 values are listed in the release manifest; update signatures are included in the update feed. [Package verification and current limitations](docs/maintainers/4.10.2-public-acceptance.md)
+
+## First use
+
+1. **Add an account** — Open Accounts and choose the add button. Use Google authorization, a refresh token, or a local import. The terminal dashboard also supports authorization and masked token entry.
+2. **Refresh quotas** — Check each account's remaining quota and reset time before choosing one.
+3. **Switch accounts** — Save your work in Antigravity, then select Switch. Switching may close and reopen the client. Confirm the active account in Antigravity afterward.
+4. **Set your preferences** — In Settings, choose your language, theme and quick-dashboard display. Enable smart switching if you want automatic backup selection; it is off by default.
+
+From 4.10.1, **Settings → Experimental Features** offers **Chinese interface** for standalone Antigravity App on Windows and macOS. [Scope and compatibility](docs/app-experiments.md)
+
+## Everyday use
+
+| To… | Go to… |
+| --- | --- |
+| Check recent usage or model costs | Dashboard; choose a date range and Token usage or Estimated cost |
+| Check recent first-text latency and body output speed | Dashboard; medians from up to 10 local text responses across models and desktop/CLI, with sample count ([details](docs/response-performance.md)) |
+| Choose and reorder homepage summary cards | Settings > General > Dashboard cards; selections and drag order save automatically |
+| Compare five-hour and weekly quotas | Accounts; choose the quota window and list or card view |
+| Set account remarks or change account order | Accounts; edit a remark or drag an account into position |
+| Check quotas and switch without the main window | macOS menu bar, or Windows/Linux tray dashboard |
+| Choose which model families the quick dashboard shows | Settings; Gemini, Claude/GPT, or both |
+| Show reset countdowns | Settings; on hover, always visible, or hidden |
+| Configure automatic switching | Settings; choose switch timing, account selection order, thresholds and backup candidates |
+
+Smart switching has two separate choices: **when to switch** (wait for inactivity or act at the threshold), and **which account to choose** (priority order or round robin). Reorder backup candidates to suit your workflow. The background scheduler runs in the desktop app; CLI settings change the same policy but do not start a scheduler.
+
+## Terminal use
+
+Run `agy-switch` without arguments for the interactive dashboard. Use ↑/↓ or Tab to select, Enter/→ to open, and Esc/← to return. The settings editor uses Space to select candidates and Shift+↑/↓ to reorder them.
+
+```sh
+agy-switch                       # interactive dashboard
+agy-switch accounts list         # saved accounts
+agy-switch quota                 # cached quota for the selected account
+agy-switch stats                 # local usage and estimated cost
+agy-switch refresh               # fetch current quotas
+agy-switch switch user@example.com
+agy-switch policy show --json    # switching policy
+agy-switch update check          # check for a newer release
+```
+
+Use the console executable as `.\agy-switch.exe` in PowerShell. Read commands use local caches; use `refresh` for current quotas. JSON output, policy editing, sorting commands and exit codes are covered in the [CLI guide](docs/cli.md).
+
+`agy-switch` manages accounts. Google's `agy` runs Antigravity tasks. A switch also synchronizes an initialized native `agy` session; start a new invocation afterward because an existing task may retain its previous credentials.
+
+## Quotas, costs and updates
+
+### Quota readings
+
+They are the remaining quota reported for each account and window. The quick dashboard's aggregate is an equal-weight average of valid account readings, with an available-account count; it is not a combined token balance. Missing or stale readings are shown as unknown. By default, bars are green above 60%, yellow from 20–60%, and red below 20%.
+
+### Cost estimates
+
+The estimate covers the API-equivalent cost of recorded usage using known model prices. Unpriced models are marked explicitly and excluded from the estimated total. The desktop app refreshes its pricing cache; CLI reads use that local cache. [Usage and quota details](docs/menu-bar-dashboard.md)
+
+### Running tasks
+
+Save your work before switching. Tasks already in progress stay with their original session. Smart switching reads live task state and waits when it cannot confirm idle, but cannot prevent new work from starting afterward or migrate a running task. If a switch fails, inspect the client before retrying because credentials may have been partially updated. [Switching behavior](docs/low-quota-switching.md)
+
+### Updates
+
+In the app, check for updates and choose **Download and install** when available. Platform permissions and trust checks still apply. From 4.9.1, a Mac installation that fails system trust checks opens the release page before downloading and requires a manual update. Unattended Mac installation remains blocked by the signing limitation described above. Homebrew users can update through:
+
+```sh
+brew update
+brew upgrade --cask anglee0323/agy-switch/agy-switch
+```
+
+The CLI checks for updates but does not install them. [Update behavior by platform](docs/software-updates.md)
+
+### Local data
+
+Accounts and preferences are stored in `~/.antigravity_tools`. Set `ABV_DATA_DIR` to use another location, and use the same value for the app and CLI. Credentials are sensitive local files. Usage is read from local Antigravity databases and archives; conversation content is not uploaded. Google authorization and quota requests, pricing synchronization and update checks use the network. The project does not operate a credential relay.
+
+## Further reading and development
+
+[CLI reference](docs/cli.md) · [macOS/Homebrew](docs/homebrew.md) · [Windows](docs/windows.md) · [Linux](docs/linux.md) · [Platform validation](docs/maintainers/native-gui-acceptance.md) · [Release checklist](docs/maintainers/release-checklist.md)
+
+To build from source, use Node.js 22+, Rust stable and the dependencies in your platform guide:
+
+```sh
+npm ci
+npm run tauri dev
+```
+
+Use `npm run tauri build` on macOS, `./scripts/build-windows.ps1` on Windows, or `./scripts/build-linux-deb.sh --native` / `--docker` on Linux. Native-window, CLI and package validation records are linked above; a successful build alone does not establish every real-account or desktop integration scenario.
+
+Derived from [lbjlaq/Antigravity-Manager](https://github.com/lbjlaq/Antigravity-Manager). Licensed under [CC BY-NC-SA 4.0](LICENSE).
+
+## Community
+
+[LINUX DO](https://linux.do)

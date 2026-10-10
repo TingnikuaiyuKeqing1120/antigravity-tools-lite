@@ -7,6 +7,12 @@ const {findModelPricing,estimateApiCost}=await import(`data:text/javascript;base
 const price={model:'gemini-2.5-flash',input:.3,output:2.5,cached:.03};
 const snapshot={prices:[price]};
 const model=name=>({model:name,input_tokens:1e6,output_tokens:1e6,cached_tokens:1e6});
+test('explicit EXP-A estimate mapping does not absorb other versions or variants',()=>{
+ const flash={...price,model:'gemini-3.8-flash'};
+ const prices={prices:[flash]};
+ assert.equal(findModelPricing('GEMINI-3.8-FLASH-EXP-A',prices),flash);
+ for(const name of ['gemini-3.8-flash-exp-b','gemini-3.7-flash','gemini-3.8-flash-lite'])assert.equal(findModelPricing(name,prices),undefined);
+});
 test('exact aliases work without borrowing neighbouring model prices',()=>{
  assert.equal(findModelPricing('Gemini 2.5 Flash-n',snapshot),price);
  for(const name of ['gemini-2.5-flash-lite','gemini-2.5','claude-sonnet-4.6',''])assert.equal(findModelPricing(name,snapshot),undefined);
@@ -14,6 +20,16 @@ test('exact aliases work without borrowing neighbouring model prices',()=>{
 test('ambiguous and invalid rates are unpriced',()=>{
  assert.equal(findModelPricing(price.model,{prices:[price,{...price}]}),undefined);
  for(const input of [-1,NaN,Infinity])assert.equal(findModelPricing(price.model,{prices:[{...price,input}]}),undefined);
+});
+test('Claude thinking aliases match only their exact model rates',()=>{
+ const opus={model:'Claude Opus 4.6',input:5,output:25,cached:.5};
+ const prices={prices:[opus]};
+ for(const name of ['claude-opus-4-6-thinking','Claude Opus 4.6 Thinking-n','claude-opus-4.6']){
+  assert.equal(findModelPricing(name,prices),opus);
+  assert.deepEqual(estimateApiCost([model(name)],prices),{usd:30.5,pricedModels:1,unpricedModels:0});
+ }
+ for(const name of ['claude-opus-4-5-thinking','claude-opus-4-6-fast','claude-opus-4-6-thinking-exp','claude-sonnet-4-6-thinking'])assert.equal(findModelPricing(name,prices),undefined);
+ assert.equal(findModelPricing('claude-opus-4-6-thinking',{prices:[opus,{...opus,model:'claude-opus-4-6-thinking'}]}),undefined);
 });
 test('input, output and cache are charged once and partial estimates exclude unknown models',()=>{
  assert.deepEqual(estimateApiCost([model(price.model),model('unknown')],snapshot),{usd:2.83,pricedModels:1,unpricedModels:1});

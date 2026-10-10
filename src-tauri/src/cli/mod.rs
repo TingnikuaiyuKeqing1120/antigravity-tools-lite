@@ -1,12 +1,15 @@
-//! agy-switch - Antigravity Tools Lite local CLI. Never initializes Tauri, a logger, or OAuth for reads.
+//! agy-switch local CLI. Never initializes Tauri, a logger, or OAuth for reads.
+mod experiments;
 mod output;
 mod picker;
 mod switch_lock;
+mod settings;
+mod workflows;
 
 use output::{AccountView, Snapshot};
 use std::path::{Path, PathBuf};
 
-const HELP: &str = "agy-switch - Antigravity Tools Lite CLI\n\nUsage:\n  agy-switch                         Interactive dashboard / menu (TUI)\n  agy-switch accounts list [--json]\n  agy-switch current [--json]\n  agy-switch quota [ACCOUNT_ID|EMAIL] [--json]\n  agy-switch switch [ACCOUNT_ID|EMAIL] [--target app|ide] [--json]\n  agy-switch stats [--json]\n  agy-switch refresh [ACCOUNT_ID|EMAIL] [--json]\n  agy-switch --help\n  agy-switch --version\n\nRead commands use local cached data only and never open the GUI or refresh tokens.\n'current' is Tools Lite's recorded account, not a live credential-store check.\n'switch' may refresh tokens, close/restart Antigravity, and update credentials.\nDefault target 'app' synchronizes APP credentials and an initialized agy session.\nThere is no CLI-only target: APP and agy may share the same credential store.\nQuit older Tools Lite versions before switching; they do not share the switch lock.\nAccounts can be managed interactively via TUI or through the GUI. ABV_DATA_DIR overrides the data directory.\n";
+const HELP: &str = "agy-switch - Antigravity account management CLI\n\nUsage:\n  agy-switch                         Interactive dashboard / menu (TUI)\n  agy-switch accounts list [--json]\n  agy-switch current [--json]\n  agy-switch quota [ACCOUNT_ID|EMAIL] [--json]\n  agy-switch switch [ACCOUNT_ID|EMAIL] [--target app|ide] [--json]\n  agy-switch stats [--json]\n  agy-switch refresh [ACCOUNT_ID|EMAIL] [--json]\n  agy-switch policy show [--json]\n  agy-switch policy set [OPTIONS] [--json]\n    --enabled true|false --mode wait|stop --strategy priority|round-robin\n    --reserve 1..98 --minimum 2..100 --model all|gemini|claude|MODEL_ID\n    --target app|app-cli|ide|vscode --candidates ID|EMAIL...\n    --clear-candidates\n  agy-switch policy order [ID|EMAIL...] [--json]\n  agy-switch accounts order [ID|EMAIL...] [--json]\n  agy-switch update check [--json]\n  agy-switch experiments show [--json]\n  agy-switch experiments translation on|off [--json]\n  agy-switch experiments run          Maintain App translation in foreground\n  agy-switch --help\n  agy-switch --version\n\nRead commands use local cached data only and never open the GUI or refresh tokens.\n'current' is agy-switch's recorded account, not a live credential-store check.\n'switch' may refresh tokens, close/restart Antigravity, and update credentials.\nDefault target 'app' synchronizes APP credentials and an initialized agy session.\nThere is no CLI-only target: APP and agy may share the same credential store.\nPolicy edits configure the desktop scheduler; they do not start a CLI daemon.\nUpdate checks contact GitHub but never download or install.\nExperimental translation affects only Antigravity App on Windows/macOS.\nKeep Switch desktop or experiments run active; injection never changes App files.\nOrdering requires every account (or selected candidate) exactly once.\nAccounts can be managed interactively via TUI or through the GUI. ABV_DATA_DIR overrides the data directory.\n";
 
 #[derive(Debug, PartialEq)]
 enum Command {
@@ -20,6 +23,14 @@ enum Command {
     Switch { selector: String, target: String },
     InteractiveSwitch { target: String },
     InteractiveDashboard,
+    PolicyShow,
+    PolicySet(settings::PolicyPatch),
+    PolicyOrder(Vec<String>),
+    AccountOrder(Vec<String>),
+    UpdateCheck,
+    ExperimentsShow,
+    TranslationSet(bool),
+    ExperimentsRun,
 }
 
 #[derive(Debug)]
@@ -49,14 +60,8 @@ impl CliError {
 }
 
 fn is_tty() -> bool {
-    #[cfg(unix)]
-    unsafe {
-        libc::isatty(libc::STDIN_FILENO) == 1 && libc::isatty(libc::STDOUT_FILENO) == 1
-    }
-    #[cfg(not(unix))]
-    {
-        false
-    }
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
 }
 
 fn parse(args: &[String], interactive: bool) -> Result<(Command, bool)> {
@@ -90,6 +95,15 @@ fn parse(args: &[String], interactive: bool) -> Result<(Command, bool)> {
         ["refresh", selector] if !selector.starts_with('-') => {
             Command::Refresh(Some((*selector).into()))
         }
+        ["policy"] | ["policy", "show"] => Command::PolicyShow,
+        ["policy", "set", rest @ ..] => Command::PolicySet(settings::parse_patch(rest)?),
+        ["policy", "order", rest @ ..] if rest.iter().all(|s| !s.starts_with('-')) => Command::PolicyOrder(rest.iter().map(|s| (*s).into()).collect()),
+        ["order", rest @ ..] if rest.iter().all(|s| !s.starts_with('-')) => Command::AccountOrder(rest.iter().map(|s| (*s).into()).collect()),
+        ["update", "check"] => Command::UpdateCheck,
+        ["experiments"] | ["experiments", "show"] => Command::ExperimentsShow,
+        ["experiments", "translation", "on"] => Command::TranslationSet(true),
+        ["experiments", "translation", "off"] => Command::TranslationSet(false),
+        ["experiments", "run"] if !json => Command::ExperimentsRun,
         ["switch"] if interactive && !json => Command::InteractiveSwitch {
             target: "app".into(),
         },
@@ -141,6 +155,12 @@ pub fn run_if_requested() -> Option<i32> {
         }
         let _ = AttachConsole(u32::MAX);
     }
+    Some(run())
+}
+
+/// Console entry point: always selects CLI mode, even if the executable is renamed.
+pub fn run() -> i32 {
+    let args: Vec<_> = std::env::args_os().collect();
     let json = args.iter().any(|arg| arg == "--json");
     let interactive = is_tty() && !json;
     let strings: std::result::Result<Vec<String>, _> = args
@@ -152,7 +172,7 @@ pub fn run_if_requested() -> Option<i32> {
         .map_err(|_| CliError::usage())
         .and_then(|args| parse(&args, interactive))
         .and_then(|(command, json)| execute(command, json));
-    Some(match result {
+    match result {
         Ok(output) => {
             if !output.is_empty() {
                 println!("{output}");
@@ -170,7 +190,7 @@ pub fn run_if_requested() -> Option<i32> {
             }
             error.code
         }
-    })
+    }
 }
 
 pub(crate) fn data_dir() -> Result<PathBuf> {
@@ -200,6 +220,14 @@ fn execute(command: Command, json: bool) -> Result<String> {
                 format!("agy-switch {}", env!("CARGO_PKG_VERSION"))
             })
         }
+        Command::ExperimentsShow => return experiments::show(&data_dir()?, json),
+        Command::TranslationSet(enabled) => return experiments::set(&data_dir()?, enabled, json),
+        Command::ExperimentsRun => return experiments::run_foreground(&data_dir()?, picker::Lang::current(&data_dir()?)),
+        Command::PolicyShow => return settings::show_policy(&data_dir()?, json),
+        Command::PolicySet(patch) => return settings::set_policy(&data_dir()?, patch, json),
+        Command::PolicyOrder(selectors) => return settings::order_policy(&data_dir()?, &selectors, json),
+        Command::AccountOrder(selectors) => return settings::order_accounts(&data_dir()?, &selectors, json),
+        Command::UpdateCheck => return settings::check_update(json, picker::Lang::current(&data_dir()?)),
         _ => {}
     }
     let snapshot = Snapshot::read(&data_dir()?)?;
@@ -209,7 +237,7 @@ fn execute(command: Command, json: bool) -> Result<String> {
                 return Ok(serde_json::json!({"schema_version": 1, "accounts": snapshot.accounts, "current_target": snapshot.current_target}).to_string());
             }
             if snapshot.accounts.is_empty() {
-                return Ok("No saved accounts. Add an account in the Tools Lite GUI.".into());
+                return Ok("No saved accounts. Add an account in the agy-switch GUI.".into());
             }
             Ok(snapshot
                 .accounts
@@ -237,7 +265,7 @@ fn execute(command: Command, json: bool) -> Result<String> {
             };
             let quota = account.quota.as_ref().ok_or(CliError {
                 code: 4,
-                message: "No cached quota. Refresh this account's quota in the Tools Lite GUI.",
+                message: "No cached quota. Refresh this account's quota in the agy-switch GUI.",
             })?;
             Ok(if json {
                 serde_json::json!({"schema_version": 1, "account_id": account.id, "email": account.email, "cached": true, "quota": quota}).to_string()
@@ -332,7 +360,7 @@ fn execute(command: Command, json: bool) -> Result<String> {
         }
         Command::InteractiveSwitch { target } => {
             if snapshot.accounts.is_empty() {
-                return Ok("No saved accounts. Add an account in the Tools Lite GUI.".into());
+                return Ok("No saved accounts. Add an account in the agy-switch GUI.".into());
             }
             let lang = picker::Lang::current(&data_dir()?);
             let selected_account = match picker::select_account_interactive(&snapshot.accounts, lang) {
@@ -384,7 +412,7 @@ fn switch_error(error: &str) -> CliError {
     if error.contains("APP") && (error.contains("updated") || error.contains("recovery failed")) {
         return CliError::data("The switch may be partially applied. Check the active accounts in Antigravity and agy before retrying.");
     }
-    CliError::data("Account switch failed; credentials may be partially updated. Check Antigravity and agy. Use the Tools Lite GUI to diagnose or sign in again.")
+    CliError::data("Account switch failed; credentials may be partially updated. Check Antigravity and agy. Use the agy-switch GUI to diagnose or sign in again.")
 }
 
 fn ensure_cli_switch_target(
@@ -494,9 +522,20 @@ mod tests {
             &["list", "--json", "--json"],
             &["switch", "a", "extra"],
             &["--wat"],
+            &["experiments", "translation", "maybe"],
+            &["experiments", "run", "--json"],
+            &["experiments", "show", "extra"],
         ] {
             assert_eq!(parse_test(input).unwrap_err().code, 2);
         }
+    }
+    #[test]
+    fn experimental_commands_share_the_switch_and_require_explicit_foreground_run() {
+        assert_eq!(parse_test(&["experiments", "show", "--json"]).unwrap(), (Command::ExperimentsShow, true));
+        assert_eq!(parse_test(&["experiments"]).unwrap(), (Command::ExperimentsShow, false));
+        assert_eq!(parse_test(&["experiments", "translation", "on", "--json"]).unwrap(), (Command::TranslationSet(true), true));
+        assert_eq!(parse_test(&["experiments", "translation", "off"]).unwrap(), (Command::TranslationSet(false), false));
+        assert_eq!(parse_test(&["experiments", "run"]).unwrap(), (Command::ExperimentsRun, false));
     }
     #[test]
     fn missing_app_cannot_fall_back_to_file_only_switch() {

@@ -9,6 +9,7 @@ const GEMINI_PRICING_URL: &str = "https://ai.google.dev/gemini-api/docs/pricing?
 const AGENT_PLATFORM_PRICING_URL: &str =
     "https://cloud.google.com/gemini-enterprise-agent-platform/generative-ai/pricing?hl=en";
 const CACHE_TTL_SECONDS: i64 = 24 * 60 * 60;
+const PARSER_REVISION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ApiPricing {
@@ -36,6 +37,8 @@ fn default_true() -> bool {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiPricingSnapshot {
+    #[serde(default)]
+    pub parser_revision: u32,
     pub prices: Vec<ApiPricing>,
     pub fetched_at: i64,
     pub stale: bool,
@@ -48,7 +51,7 @@ pub struct ApiPricingSnapshot {
 pub async fn get_api_pricing() -> Result<ApiPricingSnapshot, String> {
     let now = Utc::now().timestamp();
     if let Some(mut cached) = read_cache() {
-        if now.saturating_sub(cached.fetched_at) < CACHE_TTL_SECONDS && !cached.prices.is_empty() {
+        if cached.parser_revision == PARSER_REVISION && now.saturating_sub(cached.fetched_at) < CACHE_TTL_SECONDS && !cached.prices.is_empty() {
             cached.stale = false;
             cached.warning = None;
             let custom = read_custom_pricing();
@@ -59,7 +62,7 @@ pub async fn get_api_pricing() -> Result<ApiPricingSnapshot, String> {
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(12))
-        .user_agent("Antigravity Tools local usage dashboard")
+        .user_agent("agy-switch local usage dashboard")
         .build()
         .map_err(|error| error.to_string())?;
 
@@ -89,6 +92,7 @@ pub async fn get_api_pricing() -> Result<ApiPricingSnapshot, String> {
 
     if !prices.is_empty() {
         let snapshot = ApiPricingSnapshot {
+            parser_revision: PARSER_REVISION,
             prices,
             fetched_at: now,
             stale: false,
@@ -115,6 +119,7 @@ pub async fn get_api_pricing() -> Result<ApiPricingSnapshot, String> {
     }
 
     let mut fallback = ApiPricingSnapshot {
+        parser_revision: PARSER_REVISION,
         prices: Vec::new(),
         fetched_at: now,
         stale: true,
@@ -215,7 +220,7 @@ pub fn apply_custom_pricing(snapshot: &mut ApiPricingSnapshot, custom_entries: &
 
 pub fn cached_pricing() -> Option<ApiPricingSnapshot> {
     let mut snapshot = read_cache()?;
-    snapshot.stale = Utc::now().timestamp().saturating_sub(snapshot.fetched_at) >= CACHE_TTL_SECONDS;
+    snapshot.stale = snapshot.parser_revision != PARSER_REVISION || Utc::now().timestamp().saturating_sub(snapshot.fetched_at) >= CACHE_TTL_SECONDS;
     let custom = read_custom_pricing();
     apply_custom_pricing(&mut snapshot, &custom);
     Some(snapshot)
@@ -270,7 +275,7 @@ fn parse_gemini_prices(html: &str, today: NaiveDate) -> Vec<ApiPricing> {
 }
 
 fn parse_gemini_section(section: &str, model: &str, today: NaiveDate) -> Option<ApiPricing> {
-    let standard_heading_regex = Regex::new(r#"(?is)<h3\b[^>]*\bid="standard"[^>]*>.*?</h3>"#)
+    let standard_heading_regex = Regex::new(r#"(?is)<h3\b[^>]*\bid="standard(?:_\d+)?"[^>]*>.*?</h3>"#)
         .expect("valid Standard heading regex");
     let standard_heading = standard_heading_regex.find(section)?;
     let after_heading = &section[standard_heading.end()..];
@@ -460,6 +465,49 @@ mod tests {
         );
     }
 
+    #[test]
+    fn parses_numbered_standard_sections_without_using_batch_rates() {
+        let html = r#"
+            <h2 id="gemini-3.8-flash">Flash</h2>
+            <h3 id="standard">Standard</h3><table>
+              <tr><td>Input price</td><td>Free</td><td>$0.75</td></tr>
+              <tr><td>Output price</td><td>Free</td><td>$3.75</td></tr>
+              <tr><td>Context caching price</td><td>Free</td><td>$0.075</td></tr>
+            </table>
+            <h2 id="gemini-3.7-flash">Previous Flash</h2>
+            <h3 id="batch_1">Batch</h3><table>
+              <tr><td>Input price</td><td>Free</td><td>$0.375</td></tr>
+              <tr><td>Output price</td><td>Free</td><td>$1.875</td></tr>
+            </table>
+            <h3 id="standard_1">Standard</h3><table>
+              <tr><td>Input price</td><td>Free</td><td>$0.75</td></tr>
+              <tr><td>Output price</td><td>Free</td><td>$3.75</td></tr>
+              <tr><td>Context caching price</td><td>Free</td><td>$0.075</td></tr>
+            </table>
+        "#;
+        let prices = parse_gemini_prices(html, NaiveDate::from_ymd_opt(2026, 10, 5).unwrap());
+        assert_eq!(prices.len(), 2);
+        assert_eq!(prices[1].model, "gemini-3.7-flash");
+        assert_eq!((prices[1].input, prices[1].output, prices[1].cached), (0.75, 3.75, 0.075));
+    }
+
+    #[test]
+    fn parses_claude_global_rates_without_batch_or_regional_overrides() {
+        let html = r#"<table>
+            <tr><td>Claude Opus 4.6</td><td>Input</td><td>$5.00</td></tr>
+            <tr><td></td><td>Output</td><td>$25.00</td></tr>
+            <tr><td></td><td>Batch Input</td><td>$2.50</td></tr>
+            <tr><td></td><td>5m Cache Write</td><td>$6.25</td></tr>
+            <tr><td></td><td>Cache Hit</td><td>$0.50</td></tr>
+            </table><table>
+            <tr><td>Claude Opus 4.6</td><td>Input</td><td>$5.50</td></tr>
+            <tr><td></td><td>Output</td><td>$27.50</td></tr>
+            <tr><td></td><td>Cache Hit</td><td>$0.55</td></tr>
+            </table>"#;
+        let prices = parse_agent_platform_prices(html, NaiveDate::from_ymd_opt(2026, 10, 9).unwrap());
+        assert_eq!(prices.len(), 1);
+        assert_eq!((prices[0].input, prices[0].output, prices[0].cached), (5.0, 25.0, 0.5));
+    }
     #[test]
     fn parses_gemini_model_sections() {
         let html = r#"

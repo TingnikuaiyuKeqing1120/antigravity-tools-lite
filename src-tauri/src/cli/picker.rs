@@ -1,6 +1,7 @@
 use super::output::{AccountView, QuotaView, Snapshot};
 use super::{CliError, HeadlessIntegration};
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
+use crossterm::{event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers}, terminal, execute, cursor};
 use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,35 +80,13 @@ pub fn pad_right(s: &str, target_width: usize) -> String {
 }
 
 pub fn get_terminal_width() -> usize {
-    #[cfg(unix)]
-    {
-        unsafe {
-            let mut ws: libc::winsize = std::mem::zeroed();
-            if libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) == 0 && ws.ws_col > 0 {
-                return ws.ws_col as usize;
-            }
-        }
-    }
-    std::env::var("COLUMNS")
-        .ok()
-        .and_then(|c| c.parse::<usize>().ok())
-        .unwrap_or(80)
+    terminal::size().map(|(width, _)| usize::from(width)).ok().filter(|v| *v > 0)
+        .or_else(|| std::env::var("COLUMNS").ok()?.parse().ok()).unwrap_or(80)
 }
 
 pub fn get_terminal_height() -> usize {
-    #[cfg(unix)]
-    {
-        unsafe {
-            let mut ws: libc::winsize = std::mem::zeroed();
-            if libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) == 0 && ws.ws_row > 0 {
-                return ws.ws_row as usize;
-            }
-        }
-    }
-    std::env::var("LINES")
-        .ok()
-        .and_then(|c| c.parse::<usize>().ok())
-        .unwrap_or(24)
+    terminal::size().map(|(_, height)| usize::from(height)).ok().filter(|v| *v > 0)
+        .or_else(|| std::env::var("LINES").ok()?.parse().ok()).unwrap_or(24)
 }
 
 pub fn truncate_display_width(s: &str, max_w: usize) -> String {
@@ -487,9 +466,9 @@ pub(crate) fn progress_bar(percentage: i32, width: usize) -> String {
     }
     let empty = width.saturating_sub(filled);
 
-    let color = if clamped > 50 {
+    let color = if clamped > 60 {
         "\x1b[32m" // green
-    } else if clamped > 20 {
+    } else if clamped >= 20 {
         "\x1b[33m" // yellow
     } else {
         "\x1b[31m" // red
@@ -521,9 +500,7 @@ fn estimate_cost(models: &[crate::modules::native_token_stats::LocalTokenModel])
 fn period_cost(summary: &crate::modules::native_token_stats::LocalTokenUsageSummary, period: usize, total: u64, lang: Lang) -> String {
     let models = match period { 0 => &summary.by_model_today, 1 => &summary.by_model_yesterday, 2 => &summary.by_model_3_days, 3 => &summary.by_model_7_days, _ => &summary.by_model };
     if models.is_empty() && total > 0 { return format_cost(None, lang); }
-    let (cost, missing) = estimate_cost(models);
-    let value = format_cost(cost, lang);
-    if cost.is_some() && missing > 0 { match lang { Lang::Zh => format!("{}（部分）", value), Lang::En => format!("{} (partial)", value) } } else { value }
+    format_cost(estimate_cost(models).0, lang)
 }
 fn format_cost(usd: Option<f64>, lang: Lang) -> String {
     let Some(usd) = usd else { return match lang { Lang::Zh => "未计价".into(), Lang::En => "Unpriced".into() }; };
@@ -531,129 +508,73 @@ fn format_cost(usd: Option<f64>, lang: Lang) -> String {
 }
 
 fn open_browser(url: &str) {
-    #[cfg(target_os = "macos")]
-    let _ = std::process::Command::new("open").arg(url).spawn();
-    #[cfg(target_os = "linux")]
-    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
-    #[cfg(target_os = "windows")]
-    let _ = std::process::Command::new("cmd")
-        .args(["/C", "start", "", url])
-        .spawn();
+    let _ = tauri_plugin_opener::open_url(url, None::<&str>);
 }
 
-#[cfg(unix)]
 struct AlternateScreenGuard;
-
-#[cfg(unix)]
 impl AlternateScreenGuard {
     fn enter() -> Option<Self> {
-        unsafe {
-            if libc::isatty(libc::STDIN_FILENO) == 1 && libc::isatty(libc::STDOUT_FILENO) == 1 {
-                print!("\x1b[?1049h\x1b[2J\x1b[H");
-                let _ = io::stdout().flush();
-                Some(Self)
-            } else {
-                None
-            }
-        }
+        if !super::is_tty() { return None; }
+        execute!(io::stdout(), terminal::EnterAlternateScreen, terminal::Clear(terminal::ClearType::All), cursor::MoveTo(0, 0)).ok()?;
+        Some(Self)
     }
 }
-
-#[cfg(unix)]
 impl Drop for AlternateScreenGuard {
-    fn drop(&mut self) {
-        unsafe {
-            let seq = b"\x1b[?1049l\x1b[?25h";
-            let _ = libc::write(libc::STDOUT_FILENO, seq.as_ptr() as *const libc::c_void, seq.len());
-        }
-    }
+    fn drop(&mut self) { let _ = execute!(io::stdout(), terminal::LeaveAlternateScreen, cursor::Show); }
 }
 
-#[cfg(unix)]
-struct RawTerminal {
-    orig: libc::termios,
-}
-
-#[cfg(unix)]
+pub(super) struct RawTerminal;
 impl RawTerminal {
-    fn enter() -> Option<Self> {
+    pub(super) fn enter() -> Option<Self> {
+        if !super::is_tty() { return None; }
+        terminal::enable_raw_mode().ok()?;
+        // The existing renderer uses normal newlines as well as explicit cursor moves.
+        #[cfg(unix)]
         unsafe {
-            if libc::isatty(libc::STDIN_FILENO) != 1 || libc::isatty(libc::STDOUT_FILENO) != 1 {
-                return None;
+            let mut raw = std::mem::zeroed();
+            if libc::tcgetattr(libc::STDIN_FILENO, &mut raw) == 0 {
+                raw.c_oflag |= libc::OPOST | libc::ONLCR;
+                let _ = libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &raw);
             }
-            let mut orig = std::mem::zeroed();
-            if libc::tcgetattr(libc::STDIN_FILENO, &mut orig) != 0 {
-                return None;
-            }
-            let mut raw = orig;
-            libc::cfmakeraw(&mut raw);
-            raw.c_oflag |= libc::OPOST | libc::ONLCR;
-            raw.c_cc[libc::VMIN] = 0;
-            raw.c_cc[libc::VTIME] = 1; // 100ms
-            if libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &raw) != 0 {
-                return None;
-            }
-            Some(Self { orig })
         }
+        Some(Self)
     }
 }
-
-#[cfg(unix)]
 impl Drop for RawTerminal {
     fn drop(&mut self) {
-        unsafe {
-            libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &self.orig);
-            let seq = b"\x1b[?25h";
-            let _ = libc::write(libc::STDOUT_FILENO, seq.as_ptr() as *const libc::c_void, seq.len());
-        }
+        let _ = terminal::disable_raw_mode();
+        let _ = execute!(io::stdout(), cursor::Show);
     }
 }
 
-enum KeyAction {
-    Up,
-    Down,
-    Enter,
-    Cancel,
-    SelectIndex(usize),
-    Char(char),
-    None,
+#[derive(Debug, PartialEq)]
+pub(super) enum KeyAction { Up, Down, Home, End, MoveUp, MoveDown, Redraw, Enter, Cancel, SelectIndex(usize), Char(char), None }
+fn key_action(key: KeyEvent) -> KeyAction {
+    if key.kind == KeyEventKind::Release { return KeyAction::None; }
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') { return KeyAction::Cancel; }
+    if key.modifiers.contains(KeyModifiers::SHIFT) {
+        match key.code { KeyCode::Up => return KeyAction::MoveUp, KeyCode::Down => return KeyAction::MoveDown, _ => {} }
+    }
+    match key.code {
+        KeyCode::Up | KeyCode::BackTab | KeyCode::Char('k' | 'K') => KeyAction::Up,
+        KeyCode::Down | KeyCode::Tab | KeyCode::Char('j' | 'J') => KeyAction::Down,
+        KeyCode::Home => KeyAction::Home,
+        KeyCode::End => KeyAction::End,
+        KeyCode::Enter | KeyCode::Right => KeyAction::Enter,
+        KeyCode::Esc | KeyCode::Left | KeyCode::Char('q' | 'Q') => KeyAction::Cancel,
+        KeyCode::Char(c @ '1'..='9') => KeyAction::SelectIndex((c as u8 - b'1') as usize),
+        KeyCode::Char(c) => KeyAction::Char(c),
+        _ => KeyAction::None,
+    }
 }
-
-#[cfg(unix)]
-fn read_key_action() -> KeyAction {
-    let mut byte = [0u8; 1];
-    let mut stdin = io::stdin();
-
+pub(super) fn read_key_action() -> KeyAction {
     loop {
-        match stdin.read(&mut byte) {
-            Ok(1) => break,
-            Ok(0) => continue,
-            _ => return KeyAction::Cancel,
+        match event::read() {
+            Ok(Event::Key(key)) => return key_action(key),
+            Ok(Event::Resize(_, _)) => return KeyAction::Redraw,
+            Ok(_) => continue,
+            Err(_) => return KeyAction::Cancel,
         }
-    }
-
-    match byte[0] {
-        b'\r' | b'\n' => KeyAction::Enter,
-        b'\x03' | b'q' | b'Q' => KeyAction::Cancel,
-        b'k' | b'K' => KeyAction::Up,
-        b'j' | b'J' => KeyAction::Down,
-        b'0' => KeyAction::Char('0'),
-        b'1'..=b'9' => KeyAction::SelectIndex((byte[0] - b'1') as usize),
-        b'\x1b' => {
-            let mut seq = [0u8; 2];
-            match stdin.read(&mut seq[0..1]) {
-                Ok(1) if seq[0] == b'[' || seq[0] == b'O' => match stdin.read(&mut seq[1..2]) {
-                    Ok(1) => match seq[1] {
-                        b'A' => KeyAction::Up,
-                        b'B' => KeyAction::Down,
-                        _ => KeyAction::None,
-                    },
-                    _ => KeyAction::Cancel,
-                },
-                _ => KeyAction::Cancel,
-            }
-        }
-        b => KeyAction::Char(b as char),
     }
 }
 
@@ -669,112 +590,47 @@ fn prompt_input(prompt: &str, max_chars: usize, secret: bool) -> PromptResult {
     print!("{}", prompt);
     let _ = io::stdout().flush();
 
-    #[cfg(unix)]
-    {
-        if let Some(raw) = RawTerminal::enter() {
-            let mut buffer = String::new();
-            let mut stdin = io::stdin();
-            let mut stdout = io::stdout();
-
-            let _ = write!(stdout, "\x1b[?25h");
-            let _ = stdout.flush();
-
-            loop {
-                let mut byte = [0u8; 1];
-                match stdin.read(&mut byte) {
-                    Ok(1) => {}
-                    Ok(0) => continue,
-                    _ => {
-                        drop(raw);
-                        return PromptResult::Cancelled;
-                    }
-                }
-
-                match byte[0] {
-                    b'\r' | b'\n' => {
-                        let _ = writeln!(stdout);
-                        let _ = stdout.flush();
-                        drop(raw);
-                        return PromptResult::Confirmed(buffer.trim().to_string());
-                    }
-                    b'\x03' => {
-                        let _ = writeln!(stdout);
-                        let _ = stdout.flush();
-                        drop(raw);
-                        return PromptResult::Cancelled;
-                    }
-                    b'\x1b' => {
-                        let mut seq = [0u8; 2];
-                        match stdin.read(&mut seq[0..1]) {
-                            Ok(1) if seq[0] == b'[' || seq[0] == b'O' => {
-                                let _ = stdin.read(&mut seq[1..2]);
-                                continue;
-                            }
-                            _ => {
-                                let _ = writeln!(stdout);
-                                let _ = stdout.flush();
-                                drop(raw);
-                                return PromptResult::Cancelled;
-                            }
-                        }
-                    }
-                    b'\x08' | 127 => {
-                        if let Some(c) = buffer.pop() {
-                            let w = if secret { 1 } else { display_width(&c.to_string()) };
-                            if w > 0 {
-                                let _ = write!(stdout, "\x1b[{}D\x1b[K", w);
-                                let _ = stdout.flush();
-                            }
-                        }
-                    }
-                    b => {
-                        if b >= 32 || b >= 0x80 {
-                            let char_len = if b < 0x80 {
-                                1
-                            } else if (b & 0xE0) == 0xC0 {
-                                2
-                            } else if (b & 0xF0) == 0xE0 {
-                                3
-                            } else if (b & 0xF8) == 0xF0 {
-                                4
-                            } else {
-                                1
-                            };
-
-                            let mut char_bytes = vec![b];
-                            if char_len > 1 {
-                                let mut rest = vec![0u8; char_len - 1];
-                                let mut read_so_far = 0;
-                                let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
-                                while read_so_far < rest.len() && std::time::Instant::now() < deadline {
-                                    match stdin.read(&mut rest[read_so_far..]) {
-                                        Ok(0) => {
-                                            std::thread::sleep(std::time::Duration::from_millis(5));
-                                        }
-                                        Ok(n) => {
-                                            read_so_far += n;
-                                        }
-                                        Err(_) => break,
-                                    }
-                                }
-                                if read_so_far == rest.len() {
-                                    char_bytes.extend(rest);
-                                }
-                            }
-
-                            if let Ok(s) = std::str::from_utf8(&char_bytes) {
-                                if let Some(c) = s.chars().next() {
-                                    if max_chars == 0 || buffer.chars().count() < max_chars {
-                                        buffer.push(c);
-                                        let _ = write!(stdout, "{}", if secret { '*' } else { c });
-                                        let _ = stdout.flush();
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+    if let Some(_raw) = RawTerminal::enter() {
+        let mut buffer = Vec::<char>::new();
+        let mut position = 0usize;
+        loop {
+            let key = match event::read() {
+                Ok(Event::Key(key)) if key.kind != KeyEventKind::Release => key,
+                Ok(_) => continue,
+                Err(_) => return PromptResult::Cancelled,
+            };
+            if key.code == KeyCode::Esc || (key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c')) {
+                println!(); return PromptResult::Cancelled;
             }
+            match key.code {
+                KeyCode::Enter => { println!(); return PromptResult::Confirmed(buffer.iter().collect::<String>().trim().to_string()); }
+                KeyCode::Left => position = position.saturating_sub(1),
+                KeyCode::Right => position = (position + 1).min(buffer.len()),
+                KeyCode::Home => position = 0,
+                KeyCode::End => position = buffer.len(),
+                KeyCode::Backspace if position > 0 => { position -= 1; buffer.remove(position); }
+                KeyCode::Delete if position < buffer.len() => { buffer.remove(position); }
+                KeyCode::Char(c) if !c.is_control() && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+                    if max_chars == 0 || buffer.len() < max_chars {
+                        buffer.insert(position, c); position += 1;
+                    }
+                }
+                _ => {}
+            }
+            // Scroll long fields within one line. Never include secret characters
+            // in the rendered string, including while moving the input cursor.
+            let prefix = truncate_display_width(prompt, get_terminal_width().saturating_sub(8));
+            let available = get_terminal_width().saturating_sub(display_width(&prefix) + 1).max(1);
+            let width = |chars: &[char]| if secret { chars.len() } else { display_width(&chars.iter().collect::<String>()) };
+            let mut start = 0;
+            while start < position && width(&buffer[start..position]) >= available { start += 1; }
+            let mut end = position;
+            while end < buffer.len() && width(&buffer[start..=end]) <= available { end += 1; }
+            let shown = if secret { "*".repeat(end - start) } else { buffer[start..end].iter().collect() };
+            print!("\x1b[2K\r{prefix}{shown}");
+            let suffix = width(&buffer[position..end]);
+            if suffix > 0 { let _ = execute!(io::stdout(), cursor::MoveLeft(suffix as u16)); }
+            let _ = io::stdout().flush();
         }
     }
 
@@ -788,17 +644,16 @@ fn prompt_input(prompt: &str, max_chars: usize, secret: bool) -> PromptResult {
     }
 }
 
-fn wait_for_key(lang: Lang) {
+pub(super) fn wait_for_key(lang: Lang) {
     let msg = match lang {
         Lang::Zh => "按 Esc 或任意键返回...",
         Lang::En => "Press Esc or any key to return...",
     };
     print!("\n\x1b[2m{}\x1b[0m", msg);
     let _ = io::stdout().flush();
-    #[cfg(unix)]
     {
         if let Some(_raw) = RawTerminal::enter() {
-            let _ = read_key_action();
+            while matches!(read_key_action(), KeyAction::Redraw | KeyAction::None) {}
             print!("\x1b[2K\r");
             let _ = io::stdout().flush();
             return;
@@ -813,7 +668,6 @@ pub fn select_menu_interactive(title: &str, items: &[&str], initial: usize, lang
         return None;
     }
 
-    #[cfg(unix)]
     {
         if let Some(_raw) = RawTerminal::enter() {
             let mut selected = initial.min(items.len() - 1);
@@ -823,23 +677,31 @@ pub fn select_menu_interactive(title: &str, items: &[&str], initial: usize, lang
             let _ = stdout.flush();
 
             let hint = match lang {
-                Lang::Zh => "(↑/↓ 移动  |  回车确认  |  数字键选择  |  Esc/0 返回)",
-                Lang::En => "(↑/↓ Navigate  |  Enter Select  |  Numbers  |  Esc/0 Back)",
+                Lang::Zh => "↑↓ / Tab 选择  Enter/→ 确认  Esc/←/0 返回",
+                Lang::En => "Up/Down/Tab select  Enter/Right open  Esc/Left/0 back",
             };
 
-            let render = |sel: usize, first: bool| {
+            let mut rendered_lines = 0;
+            let mut render = |sel: usize, first: bool| {
                 let mut out = io::stdout();
                 if !first {
-                    let _ = write!(out, "\x1b[{}A", items.len() + 1);
+                    let _ = write!(out, "\x1b[{}A", rendered_lines);
                 }
-                let _ = writeln!(out, "\x1b[2K\r\x1b[1m{}\x1b[0m \x1b[90m{}\x1b[0m", title, hint);
-                for (i, item) in items.iter().enumerate() {
+                let _ = write!(out, "\x1b[J");
+                let width = get_terminal_width().saturating_sub(2).max(8);
+                let _ = writeln!(out, "\x1b[2K\r\x1b[1m{}\x1b[0m", truncate_display_width(title, width));
+                let _ = writeln!(out, "\x1b[2K\r\x1b[90m{}\x1b[0m", truncate_display_width(hint, width));
+                let visible = get_terminal_height().saturating_sub(10).max(3).min(items.len());
+                let start = sel.saturating_sub(visible - 1);
+                for (i, item) in items.iter().enumerate().skip(start).take(visible) {
+                    let item = truncate_display_width(item, width.saturating_sub(4));
                     if i == sel {
                         let _ = writeln!(out, "\x1b[2K\r  \x1b[1;36m➤\x1b[0m \x1b[1m{}\x1b[0m", item);
                     } else {
                         let _ = writeln!(out, "\x1b[2K\r    {}", item);
                     }
                 }
+                rendered_lines = visible + 2;
                 let _ = out.flush();
             };
 
@@ -863,11 +725,14 @@ pub fn select_menu_interactive(title: &str, items: &[&str], initial: usize, lang
                         };
                         render(selected, false);
                     }
+                    KeyAction::Home => { selected = 0; render(selected, false); }
+                    KeyAction::End => { selected = items.len() - 1; render(selected, false); }
+                    KeyAction::Redraw => { render(selected, false); }
                     KeyAction::SelectIndex(idx) => {
                         let digit = (idx + 1).to_string();
                         let prefix = format!("{}.", digit);
                         for (i, item) in items.iter().enumerate() {
-                            if item.contains(&prefix) || item.starts_with(&digit) {
+                            if strip_ansi(item).trim_start().starts_with(&prefix) {
                                 print!("\x1b[?25h");
                                 let _ = stdout.flush();
                                 return Some(i);
@@ -881,7 +746,7 @@ pub fn select_menu_interactive(title: &str, items: &[&str], initial: usize, lang
                     }
                     KeyAction::Char('0') => {
                         for (i, item) in items.iter().enumerate() {
-                            if item.contains("0.") || item.starts_with('0') {
+                            if strip_ansi(item).trim_start().starts_with("0.") {
                                 print!("\x1b[?25h");
                                 let _ = stdout.flush();
                                 return Some(i);
@@ -895,7 +760,7 @@ pub fn select_menu_interactive(title: &str, items: &[&str], initial: usize, lang
                         let upper = ch.to_ascii_uppercase();
                         let prefix = format!("{}.", upper);
                         for (i, item) in items.iter().enumerate() {
-                            if item.contains(&prefix) {
+                            if strip_ansi(item).trim_start().starts_with(&prefix) {
                                 print!("\x1b[?25h");
                                 let _ = stdout.flush();
                                 return Some(i);
@@ -912,7 +777,7 @@ pub fn select_menu_interactive(title: &str, items: &[&str], initial: usize, lang
                         let _ = stdout.flush();
                         return None;
                     }
-                    KeyAction::None => {}
+                    _ => {}
                 }
             }
         }
@@ -1103,7 +968,6 @@ pub fn select_account_interactive<'a>(
         return None;
     }
 
-    #[cfg(unix)]
     {
         if let Some(_raw) = RawTerminal::enter() {
             let mut selected = accounts.iter().position(|a| a.is_current).unwrap_or(0);
@@ -1162,6 +1026,9 @@ pub fn select_account_interactive<'a>(
                             return Some(&accounts[idx]);
                         }
                     }
+                    KeyAction::Home => { selected = 0; render(selected, false); }
+                    KeyAction::End => { selected = accounts.len() - 1; render(selected, false); }
+                    KeyAction::Redraw => { render(selected, false); }
                     KeyAction::Char('0') | KeyAction::Cancel => {
                         print!("\x1b[?25h");
                         let _ = stdout.flush();
@@ -1326,7 +1193,6 @@ pub fn format_token_stats_human(
 }
 
 pub fn run_interactive_dashboard(root: &Path) -> Result<(), CliError> {
-    #[cfg(unix)]
     let _alt_screen = AlternateScreenGuard::enter();
 
     loop {
@@ -1340,11 +1206,11 @@ pub fn run_interactive_dashboard(root: &Path) -> Result<(), CliError> {
         print!("\x1b[2J\x1b[H");
         match lang {
             Lang::Zh => println!(
-                "\x1b[1mAntigravity 账号管理\x1b[0m · \x1b[36magy-switch v{}\x1b[0m",
+                "\x1b[1magy-switch 账号管理\x1b[0m: \x1b[36magy-switch v{}\x1b[0m",
                 env!("CARGO_PKG_VERSION")
             ),
             Lang::En => println!(
-                "\x1b[1mAntigravity Tools Lite\x1b[0m · \x1b[36magy-switch v{}\x1b[0m",
+                "\x1b[1magy-switch\x1b[0m: \x1b[36mv{}\x1b[0m",
                 env!("CARGO_PKG_VERSION")
             ),
         }
@@ -1387,6 +1253,9 @@ pub fn run_interactive_dashboard(root: &Path) -> Result<(), CliError> {
                     "3. 刷新配额      联网同步 Google API 最新额度",
                     "4. 添加账号      通过 Google OAuth 授权绑定新账号",
                     "5. 环境状态      关联应用与本地存储状态",
+                    "6. 策略与排序    智能切换设置、候选顺序与账号排序",
+                    "7. 检查更新      查询最新稳定版",
+                    "8. 实验功能      Antigravity App 界面汉化",
                     "0. 退出控制台    退出当前工具",
                 ],
             ),
@@ -1398,6 +1267,9 @@ pub fn run_interactive_dashboard(root: &Path) -> Result<(), CliError> {
                     "3. Refresh             Fetch live quotas from Google API",
                     "4. Add Account         Authorize new Google account via OAuth",
                     "5. Status              Inspect linked applications and storage",
+                    "6. Settings & Order    Smart switching, candidates and account order",
+                    "7. Check for Updates   Query the latest stable release",
+                    "8. Experimental Features   Antigravity App Chinese interface",
                     "0. Exit                Quit agy-switch",
                 ],
             ),
@@ -1411,7 +1283,10 @@ pub fn run_interactive_dashboard(root: &Path) -> Result<(), CliError> {
             Some(2) => show_refresh_quotas(root, lang),
             Some(3) => show_add_account(root, lang),
             Some(4) => show_system_status(&snapshot, root, lang),
-            Some(5) | None => {
+            Some(5) => super::workflows::show_settings(root, lang),
+            Some(6) => super::workflows::show_updates(lang),
+            Some(7) => super::workflows::show_experiments(root, lang),
+            Some(8) | None => {
                 let exit_msg = match lang {
                     Lang::Zh => "\n已退出 agy-switch 控制台。\n",
                     Lang::En => "\nExited agy-switch.\n",
@@ -1426,6 +1301,7 @@ pub fn run_interactive_dashboard(root: &Path) -> Result<(), CliError> {
 }
 
 enum HubAction {
+    Actions(usize),
     Switch(usize),
     ViewDetails(usize),
     EditLabel(usize),
@@ -1439,7 +1315,6 @@ fn select_account_hub_action(
     selected: &mut usize,
     lang: Lang,
 ) -> HubAction {
-    #[cfg(unix)]
     {
         if let Some(_raw) = RawTerminal::enter() {
             let mut stdout = io::stdout();
@@ -1452,8 +1327,8 @@ fn select_account_hub_action(
                 Lang::En => "* marks the locally selected account",
             };
             let prompt_text = match lang {
-                Lang::Zh => "操作: (↑/↓ 移动  |  回车 切换  |  V 详情  |  R 备注  |  T 启/禁  |  X 删除  |  Esc/0 返回)",
-                Lang::En => "Action: (↑/↓ Move  |  Enter Switch  |  V Details  |  R Label  |  T Toggle  |  X Delete  |  Esc/0 Back)",
+                Lang::Zh => "操作: (↑/↓ 移动  |  回车 操作菜单  |  S 切换  |  V 详情  |  R 备注  |  T 启/禁  |  X 删除  |  Esc/0 返回)",
+                Lang::En => "Action: (↑/↓ Move  |  Enter Actions  |  S Switch  |  V Details  |  R Label  |  T Toggle  |  X Delete  |  Esc/0 Back)",
             };
 
             let render = |sel: usize, initial: bool| {
@@ -1504,8 +1379,12 @@ fn select_account_hub_action(
                     KeyAction::Enter => {
                         print!("\x1b[?25h");
                         let _ = stdout.flush();
-                        return HubAction::Switch(*selected);
+                        return HubAction::Actions(*selected);
                     }
+                    KeyAction::Home => { *selected = 0; render(*selected, false); }
+                    KeyAction::End => { *selected = accounts.len() - 1; render(*selected, false); }
+                    KeyAction::Redraw => { render(*selected, false); }
+                    KeyAction::Char('s' | 'S') => return HubAction::Switch(*selected),
                     KeyAction::Char('v') | KeyAction::Char('V') | KeyAction::Char(' ') => {
                         print!("\x1b[?25h");
                         let _ = stdout.flush();
@@ -1585,9 +1464,25 @@ fn show_accounts_and_quotas_hub(root: &Path, lang: Lang) {
         };
         println!("\x1b[1m{}\x1b[0m\n", header);
 
-        let action = select_account_hub_action(&snapshot.accounts, &mut selected, lang);
+        let action = match select_account_hub_action(&snapshot.accounts, &mut selected, lang) {
+            HubAction::Actions(idx) => {
+                print!("\x1b[2J\x1b[H");
+                println!("\x1b[1m{}\x1b[0m\n", super::output::terminal_text(&snapshot.accounts[idx].email));
+                let (title, items) = match lang {
+                    Lang::Zh => ("账号操作", vec!["1. 查看配额", "2. 切换账号", "3. 修改备注", "4. 启用或禁用", "5. 删除账号", "0. 返回"]),
+                    Lang::En => ("Account actions", vec!["1. View quotas", "2. Switch account", "3. Edit label", "4. Enable or disable", "5. Delete account", "0. Back"]),
+                };
+                match select_menu_interactive(title, &items, 0, lang) {
+                    Some(0) => HubAction::ViewDetails(idx), Some(1) => HubAction::Switch(idx),
+                    Some(2) => HubAction::EditLabel(idx), Some(3) => HubAction::ToggleStatus(idx),
+                    Some(4) => HubAction::Delete(idx), _ => continue,
+                }
+            }
+            action => action,
+        };
 
         match action {
+            HubAction::Actions(_) => unreachable!(),
             HubAction::Switch(idx) => {
                 let target_acc = &snapshot.accounts[idx];
                 print!("\x1b[2J\x1b[H");
@@ -1658,8 +1553,8 @@ fn show_accounts_and_quotas_hub(root: &Path, lang: Lang) {
                 let target_acc = &snapshot.accounts[idx];
                 print!("\x1b[2J\x1b[H");
                 let edit_header = match lang {
-                    Lang::Zh => format!("修改账号备注 · \x1b[1;36m{}\x1b[0m\n", target_acc.email),
-                    Lang::En => format!("Edit Account Label · \x1b[1;36m{}\x1b[0m\n", target_acc.email),
+                    Lang::Zh => format!("修改账号备注: \x1b[1;36m{}\x1b[0m\n", target_acc.email),
+                    Lang::En => format!("Edit Account Label: \x1b[1;36m{}\x1b[0m\n", target_acc.email),
                 };
                 println!("{}", edit_header);
 
@@ -1725,8 +1620,8 @@ fn show_accounts_and_quotas_hub(root: &Path, lang: Lang) {
                 let target_acc = &snapshot.accounts[idx];
                 print!("\x1b[2J\x1b[H");
                 let del_header = match lang {
-                    Lang::Zh => format!("删除账号 · \x1b[1;31m{}\x1b[0m\n", target_acc.email),
-                    Lang::En => format!("Delete Account · \x1b[1;31m{}\x1b[0m\n", target_acc.email),
+                    Lang::Zh => format!("删除账号: \x1b[1;31m{}\x1b[0m\n", target_acc.email),
+                    Lang::En => format!("Delete Account: \x1b[1;31m{}\x1b[0m\n", target_acc.email),
                 };
                 println!("{}", del_header);
 
@@ -1737,8 +1632,8 @@ fn show_accounts_and_quotas_hub(root: &Path, lang: Lang) {
                 println!("{}", warn_text);
 
                 let confirm_prompt = match lang {
-                    Lang::Zh => "确定要永久删除该账号吗？(按 [y/回车] 确认删除，按 [Esc/n] 取消返回): ",
-                    Lang::En => "Permanently delete this account? ([y/Enter] confirm, [Esc/n] cancel): ",
+                    Lang::Zh => "确定要永久删除该账号吗？(输入 y 后按回车确认，按 Esc 取消): ",
+                    Lang::En => "Permanently delete this account? (Type y and press Enter to confirm; Esc cancels): ",
                 };
                 match prompt_line_with_cancel(confirm_prompt, 10) {
                     PromptResult::Confirmed(ans) if ans.eq_ignore_ascii_case("y") || ans.eq_ignore_ascii_case("yes") => {
@@ -1776,8 +1671,8 @@ fn show_accounts_and_quotas_hub(root: &Path, lang: Lang) {
 fn show_single_account_quota(acc: &AccountView, lang: Lang) {
     print!("\x1b[2J\x1b[H");
     let title = match lang {
-        Lang::Zh => format!("账号配额详情 · {}", acc.email),
-        Lang::En => format!("Quota Details · {}", acc.email),
+        Lang::Zh => format!("账号配额详情: {}", acc.email),
+        Lang::En => format!("Quota Details: {}", acc.email),
     };
     println!("\x1b[1m{}\x1b[0m\n", title);
 
@@ -2096,8 +1991,7 @@ fn show_token_statistics(lang: Lang) {
             let _ = io::stdout().flush();
         }
 
-        #[cfg(unix)]
-        {
+            {
             if let Some(_raw) = RawTerminal::enter() {
                 match read_key_action() {
                     KeyAction::Char('m') | KeyAction::Char('M') | KeyAction::Char('\t') => {
@@ -2115,10 +2009,6 @@ fn show_token_statistics(lang: Lang) {
             } else {
                 break;
             }
-        }
-        #[cfg(not(unix))]
-        {
-            break;
         }
     }
 }
@@ -2429,8 +2319,8 @@ fn show_add_account(_root: &Path, lang: Lang) {
             Some(0) => {
             print!("\x1b[2J\x1b[H");
             let sub_title = match lang {
-                Lang::Zh => "浏览器一键授权 · Google OAuth",
-                Lang::En => "Browser Authorization · Google OAuth",
+                Lang::Zh => "浏览器一键授权: Google OAuth",
+                Lang::En => "Browser Authorization: Google OAuth",
             };
             println!("\x1b[1m{}\x1b[0m\n", sub_title);
 
@@ -2541,8 +2431,8 @@ fn show_add_account(_root: &Path, lang: Lang) {
         Some(1) => {
             print!("\x1b[2J\x1b[H");
             let sub_title = match lang {
-                Lang::Zh => "手动导入凭据 · Refresh Token",
-                Lang::En => "Manual Import · Refresh Token",
+                Lang::Zh => "手动导入凭据: Refresh Token",
+                Lang::En => "Manual Import: Refresh Token",
             };
             println!("\x1b[1m{}\x1b[0m\n", sub_title);
 
@@ -2734,6 +2624,20 @@ fn show_system_status(snapshot: &Snapshot, root: &Path, lang: Lang) {
 #[cfg(test)]
 mod presentation_tests {
     use super::*;
+    #[test]
+    fn keyboard_navigation_is_identical_across_platforms() {
+        for (code, expected) in [(KeyCode::Up, KeyAction::Up), (KeyCode::Down, KeyAction::Down),
+            (KeyCode::Left, KeyAction::Cancel), (KeyCode::Right, KeyAction::Enter),
+            (KeyCode::Esc, KeyAction::Cancel), (KeyCode::Enter, KeyAction::Enter),
+            (KeyCode::Char('2'), KeyAction::SelectIndex(1)), (KeyCode::Tab, KeyAction::Down),
+            (KeyCode::BackTab, KeyAction::Up), (KeyCode::Home, KeyAction::Home), (KeyCode::End, KeyAction::End)] {
+            assert_eq!(key_action(KeyEvent::new(code, KeyModifiers::NONE)), expected);
+        }
+        assert_eq!(key_action(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)), KeyAction::Cancel);
+        assert_eq!(key_action(KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT)), KeyAction::MoveUp);
+        assert_eq!(key_action(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT)), KeyAction::MoveDown);
+        assert_eq!(key_action(KeyEvent::new_with_kind(KeyCode::Enter, KeyModifiers::NONE, KeyEventKind::Release)), KeyAction::None);
+    }
     #[test]
     fn unpriced_costs_are_localized_and_never_reported_as_free() {
         assert_eq!(format_cost(None, Lang::Zh), "未计价");

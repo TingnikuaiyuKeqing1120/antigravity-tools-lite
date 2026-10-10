@@ -92,6 +92,17 @@ fn request_email(
 /// error: falling back to the keyring then would reproduce the false identity.
 #[cfg(target_os = "macos")]
 pub(crate) fn running_email(configured: Option<&str>) -> Result<Option<String>, String> {
+    let client = status_client()?;
+    with_running_connection(configured, |port, csrf| request_email(&client, port, csrf))
+}
+
+/// Execute a bounded RPC only on the standalone App's verified, owned listener.
+/// Credentials stay in memory and never appear in errors or diagnostics.
+#[cfg(target_os = "macos")]
+pub(crate) fn with_running_connection<T>(
+    configured: Option<&str>,
+    mut operation: impl FnMut(u16, &str) -> Result<T, String>,
+) -> Result<Option<T>, String> {
     use super::app_metadata_macos as metadata;
     let Some(installation) = metadata::installed(configured)? else {
         return Ok(None);
@@ -104,9 +115,8 @@ pub(crate) fn running_email(configured: Option<&str>) -> Result<Option<String>, 
         Err("not_running") => return Ok(None),
         Err(error) => return Err(error.into()),
     };
-    if installation.version != "2.19.1" {
-        return Err("running_app_identity_unavailable".into());
-    }
+    // Package identity, process ownership and the status response establish
+    // compatibility. A client update alone must not prevent this read-only RPC.
     let servers = metadata::pids(&[
         "-P".into(),
         app_pid.to_string(),
@@ -125,6 +135,27 @@ pub(crate) fn running_email(configured: Option<&str>) -> Result<Option<String>, 
         &["-p".into(), server.to_string(), "-o".into(), "ppid=".into()],
     )?;
     if parent.parse::<u32>().ok() != Some(app_pid) {
+        return Err("running_app_identity_unavailable".into());
+    }
+    let result = with_server_connection(*server, &executable, &mut operation)?;
+    metadata::verify_executable(app_pid, &installation.executable)?;
+    Ok(Some(result))
+}
+
+/// A verified App or Hub server; CSRF metadata is kept only in memory.
+#[cfg(target_os = "macos")]
+pub(crate) fn with_server_connection<T>(
+    server: u32,
+    executable: &std::path::Path,
+    mut operation: impl FnMut(u16, &str) -> Result<T, String>,
+) -> Result<T, String> {
+    use super::app_metadata_macos as metadata;
+    metadata::verify_executable(server, executable)?;
+    let owner = metadata::command(
+        "/bin/ps",
+        &["-p".into(), server.to_string(), "-o".into(), "uid=".into()],
+    )?;
+    if owner.parse::<u32>().ok() != Some(unsafe { libc::geteuid() }) {
         return Err("running_app_identity_unavailable".into());
     }
     let args = metadata::command(
@@ -157,14 +188,13 @@ pub(crate) fn running_email(configured: Option<&str>) -> Result<Option<String>, 
     if ports.is_empty() || ports.len() > 8 {
         return Err("running_app_identity_unavailable".into());
     }
-    let client = status_client()?;
     for port in ports {
         // Revalidate ownership before sending the in-memory CSRF value.
-        metadata::verify_executable(*server, &executable)?;
-        metadata::listener(port, *server)?;
-        if let Ok(email) = request_email(&client, port, csrf) {
-            metadata::verify_executable(app_pid, &installation.executable)?;
-            return Ok(Some(email));
+        metadata::verify_executable(server, executable)?;
+        metadata::listener(port, server)?;
+        if let Ok(result) = operation(port, csrf) {
+            metadata::verify_executable(server, executable)?;
+            return Ok(result);
         }
     }
     Err("running_app_identity_unavailable".into())

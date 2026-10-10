@@ -4,7 +4,8 @@ import { mkdtempSync, readdirSync, readFileSync, writeFileSync, rmSync } from 'n
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { releaseVersion, sha256, writeManifest } from './release-assets.mjs';
+import { releaseVersion, sha256, writeManifest, packageNames, focusedDownloads } from './release-assets.mjs';
+import { desktopBrand } from './release-brand.mjs';
 
 const gh = args => execFileSync('gh', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 16 * 1024 * 1024 });
 const newer = (a, b) => { const aa = a.split('.').map(Number), bb = b.split('.').map(Number); for (let i = 0; i < 3; i++) { if (aa[i] !== bb[i]) return aa[i] > bb[i]; } return false; };
@@ -12,15 +13,27 @@ const newer = (a, b) => { const aa = a.split('.').map(Number), bb = b.split('.')
 export function releaseNotes({ tag, commit, repository }) {
   const version = releaseVersion(tag);
   // Each version needs reviewed notes; do not carry old acceptance claims forward.
-  const acceptance = readFileSync(new URL(`../docs/release-notes/${version}.md`, import.meta.url), 'utf8').trim();
+  const acceptance = readFileSync(new URL(`../docs/release-notes/${version}.md`, import.meta.url), 'utf8').trim()
+    // GitHub Release bodies do not share the Markdown source file's directory.
+    .replace(/\]\(([^)\s]+)\)/g, (link, target) => {
+      if (/^(?:[a-z][a-z\d+.-]*:|\/\/|#)/i.test(target)) return link;
+      const base = `https://github.com/${repository}/blob/${commit}/`;
+      return `](${new URL(target.startsWith('/') ? target.slice(1) : target, target.startsWith('/') ? base : `${base}docs/release-notes/`).href})`;
+    });
   if (!acceptance) throw new Error('Release acceptance notes are empty');
-  return `Antigravity Tools Lite ${version}\n\nSource commit: ${commit}\n\nPackages: macOS Apple Silicon ZIP, Windows x64 NSIS installer, Linux amd64 deb. Checksums and source manifest are attached.\n\nThese builds are not Developer ID signed/notarized or Windows Authenticode signed. Homebrew installation becomes available after the generated cask is verified and merged into the repository's Casks directory.\n\n${acceptance}\n\n[Detailed acceptance and screenshot provenance](https://github.com/${repository}/blob/${commit}/docs/native-gui-acceptance.md)\n`;
+  const names = packageNames(version);
+  const asset = (label, name) => `[${label}](https://github.com/${repository}/releases/download/${tag}/${name})`;
+  const compact = focusedDownloads(version);
+  const downloads = compact
+    ? `| macOS · Apple Silicon | Windows · x64 | Linux · x64 |\n| --- | --- | --- |\n| ${asset('Download ZIP', names[0])} | ${asset('Download installer', names[1])} | ${asset('Download deb', names[2])} |\n\nTerminal packages: ${asset('Windows console ZIP', names[3])} · ${asset('Linux console tarball', names[4])}.\n\nSHA-256 values and source commit are in ${asset('release-manifest.json', 'release-manifest.json')}. The app reads the update feed automatically; the Mac updater tarball is not needed for a manual install.`
+    : 'Packages: macOS Apple Silicon ZIP, Windows x64 NSIS installer, Linux amd64 deb, Windows console ZIP and Linux console tarball. Checksums and source manifest are attached.';
+  return `${desktopBrand(version).app} ${version}\n\n${downloads}\n\n${acceptance}\n\nSource commit: ${commit}\n\n[Platform verification](https://github.com/${repository}/blob/${commit}/docs/maintainers/native-gui-acceptance.md)\n`;
 }
 
 export function publishRelease(directory, context, runGh = gh) {
   const { tag, repository, commit } = context;
   const version = releaseVersion(tag);
-  const expected = writeManifest(directory, context).sort();
+  const expected = writeManifest(directory, { ...context, candidate: false }).sort();
   const expectedNotes = releaseNotes(context);
   const assertNotes = release => { if (release.body !== expectedNotes) throw new Error('Release notes differ from the reviewed acceptance disclosure; review the draft before resuming'); };
   const json = args => JSON.parse(runGh(args));
@@ -46,13 +59,11 @@ export function publishRelease(directory, context, runGh = gh) {
   };
   try {
     if (!release) {
-      const notes = join(scratch, 'notes.md');
-      writeFileSync(notes, expectedNotes);
-      runGh(['release', 'create', tag, '--repo', repository, '--draft', '--verify-tag', '--target', commit,
-        '--title', `Antigravity Tools Lite ${version}`, '--notes-file', notes]);
-      // The REST tag endpoint finds published releases only. Authenticated
-      // listing includes drafts; once resolved, refresh through the release ID.
-      release = findRelease(listReleases());
+      const request = join(scratch, 'release.json');
+      writeFileSync(request, JSON.stringify({ tag_name: tag, target_commitish: commit, draft: true,
+        name: `${desktopBrand(version).app} ${version}`, body: expectedNotes }));
+      // Use the creation response's ID; the release listing can lag behind.
+      release = json(['api', '--method', 'POST', `repos/${repository}/releases`, '--input', request]);
     }
     if (!release?.draft) throw new Error('Could not confirm the draft release');
     if (!Number.isSafeInteger(release.id) || release.id <= 0) throw new Error('Draft has no valid release ID');

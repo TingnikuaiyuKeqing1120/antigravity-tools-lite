@@ -8,6 +8,12 @@ mod models;
 mod modules;
 mod utils;
 
+/// Production lifecycle code exposed only to the hosted debug acceptance example.
+#[cfg(all(debug_assertions, feature = "native-gui-test", not(target_os = "macos")))]
+pub mod desktop_lifecycle {
+    pub use crate::modules::{desktop, tray};
+}
+
 use tauri::Manager;
 use tracing::{info, warn};
 
@@ -226,14 +232,17 @@ pub fn run() {
     windows_api::disable_efficiency_mode();
 
     let tray_enabled = should_enable_tray();
+    let context = application_context();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(modules::updater::UpdateRuntime::default())
         .plugin(
             tauri_plugin_autostart::Builder::new()
                 .arg("--autostart")
-                .app_name("Antigravity Tools Lite")
+                .app_name("agy-switch")
                 .build(),
         )
         .plugin(
@@ -257,6 +266,8 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             modules::desktop::install_dashboard_shortcut(app.handle())?;
             modules::auto_switch::start(app.handle().clone());
+            modules::quota_refresh::start(app.handle().clone());
+            modules::account_sync::start(app.handle().clone());
             if tray_enabled {
                 match modules::tray::create_tray(app.handle()) {
                     Ok(()) => {
@@ -275,10 +286,13 @@ pub fn run() {
                     let _ = window.show();
                 }
             }
+            modules::app_experiments::initialize();
             Ok(())
         })
         .on_window_event(modules::desktop::handle_window_event)
         .invoke_handler(tauri::generate_handler![
+            modules::app_experiments::get_app_experiments,
+            modules::app_experiments::set_app_translation,
             modules::auto_switch::get_auto_switch_config,
             modules::auto_switch::set_auto_switch_config,
             modules::auto_switch::get_auto_switch_status,
@@ -294,6 +308,7 @@ pub fn run() {
             commands::get_account_dashboard_snapshot,
             commands::get_menu_bar_snapshot,
             commands::set_menu_bar_preferences,
+            commands::set_dashboard_cards,
             commands::add_account,
             commands::delete_account,
             commands::delete_accounts,
@@ -319,6 +334,7 @@ pub fn run() {
             commands::open_data_folder,
             commands::get_data_dir_path,
             commands::show_main_window,
+            modules::desktop::open_project_page,
             commands::set_window_theme,
             commands::update_account_label,
             commands::get_local_token_usage,
@@ -332,8 +348,10 @@ pub fn run() {
             commands::get_custom_pricing,
             commands::save_custom_pricing,
             commands::get_custom_pricing_file_path,
+            commands::download_and_install_update,
+            commands::get_running_version,
         ])
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("error while building tauri application")
         .run(|_app_handle, _event| {
             #[cfg(target_os = "macos")]
@@ -341,4 +359,22 @@ pub fn run() {
                 let _ = modules::desktop::show_main(_app_handle);
             }
         });
+}
+
+// WebView2 150+ ignores environment debug arguments on elevated hosts.
+// Pass only the WebDriver port through its supported API in opt-in debug CI builds.
+fn application_context() -> tauri::Context<tauri::Wry> {
+    #[allow(unused_mut)]
+    let mut context = tauri::generate_context!();
+    #[cfg(all(target_os = "windows", debug_assertions, feature = "native-gui-test"))]
+    if std::env::var("ANTIGRAVITY_NATIVE_GUI_TEST").as_deref() == Ok("1") {
+        if let Some(port) = std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").ok()
+            .and_then(|args| args.split_whitespace().find_map(|arg|
+                arg.strip_prefix("--remote-debugging-port=").and_then(|port| port.parse::<u16>().ok()))) {
+            for window in &mut context.config_mut().app.windows {
+                window.additional_browser_args = Some(format!("--remote-debugging-port={port}"));
+            }
+        }
+    }
+    context
 }

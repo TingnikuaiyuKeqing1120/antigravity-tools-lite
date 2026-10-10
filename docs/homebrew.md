@@ -1,82 +1,42 @@
-# Homebrew distribution
+# macOS installation and upgrades
 
-## Status
+AntiGravity Switch supports Apple Silicon Macs. The Homebrew cask installs the app and the `agy-switch` management command from the verified [4.10.2 release](https://github.com/anglee0323/agy-switch/releases/tag/v4.10.2). It does not install Google's `agy` client. Intel Mac and Linux Homebrew packages are not provided.
 
-This repository contains the **macOS Apple Silicon cask** at `Casks/antigravity-tools-lite.rb`, backed by the public [v4.7.9 release](https://github.com/anglee0323/antigravity-tools-lite/releases/tag/v4.7.9). It uses this repository as an explicit-URL tap; no separate tap repository is required. v4.7.6 predates the management CLI.
-
-The public ZIP, checksums, generated cask and source manifest were downloaded and compared with GitHub's asset digests. The ZIP's executable is ARM64 and reports bundle version 4.7.9; its path matches the `binary` stanza. The root cask is byte-for-byte identical to the release attachment, with ZIP SHA-256 `e7bec8cbb1656682cb4876d1bc61948c55d97c7e9264955cb2da4a2b2a8745a9`. The Homebrew recipe check loads the DSL and fetches/verifies the archive without installing or launching the app.
-
-**Native acceptance:** Homebrew upgraded v4.7.8 to v4.7.9 with a custom `--appdir`, correctly installed `agy-switch` and removed the old `agy-lite` link. Twelve existing account/configuration JSON files remained byte-for-byte unchanged. A subsequent reinstall into `/Applications` also preserved these files, and the installed bundle passed strict signature verification. Gatekeeper rejected the app (exit 3); the quarantined Brew CLI timed out after ten seconds. This is an installation/upgrade pass, **not a launch pass**. The separately downloaded public ZIP passed 14 isolated CLI checks. Uninstall and authenticated switching remain separate. No trust checks or quarantine attributes were removed. See [public-package acceptance](release-notes/4.7.9-public-acceptance.md).
-
-The cask installs both `Antigravity Tools Lite.app` and the management command `agy-switch`. It uses Homebrew's documented [`app` and `binary` artifacts](https://docs.brew.sh/Cask-Cookbook#stanza-binary). A separate formula would still carry the current desktop-linked executable, so no lightweight CLI-only formula is claimed here. Linux and Intel macOS Homebrew packages are not provided; use the existing Linux packages or build from source.
-
-## Release inputs and generation
-
-The macOS release job explicitly builds `aarch64-apple-darwin`, verifies the Mach-O architecture, and produces:
-
-- `Antigravity-Tools-Lite-VERSION-macos-arm64.zip`
-- `antigravity-tools-lite.rb`, generated from the exact ZIP with a real SHA-256 checksum
-
-The ZIP and cask are uploaded together by the existing release workflow. Editing this workflow does not itself trigger a release or create a tap. The workflow refuses a tag/version mismatch. Never replace a published ZIP or its checksum; publish a new version and update the cask through a PR.
-
-For manual generation, set these to a real archive and its intended immutable release URL; no sample release URL is assumed to exist:
+## Install with Homebrew
 
 ```sh
-node scripts/generate-homebrew.mjs \
-  --archive "$RELEASE_ZIP" \
-  --url "$RELEASE_ARCHIVE_URL" \
-  --version "$RELEASE_VERSION" \
-  --output artifacts/homebrew/Casks/antigravity-tools-lite.rb
-```
-
-The generator validates the filename/version pair, HTTPS URL and bundled executable path. It computes SHA-256 from the file; it does not use `:no_check`, upload anything, fetch the URL, or claim the release is live. The release job separately verifies that the bundled executable is ARM64. The recipe requires Apple Silicon macOS; older OS versions still need separate release acceptance.
-
-## Test a generated cask locally on a Mac
-
-After the exact ZIP is publicly available at the cask URL:
-
-```sh
-# A local-only developer tap. This command does not create a GitHub repository.
-brew tap-new local/antigravity-tools-lite
-mkdir -p "$(brew --repository local/antigravity-tools-lite)/Casks"
-cp artifacts/homebrew/Casks/antigravity-tools-lite.rb \
-  "$(brew --repository local/antigravity-tools-lite)/Casks/antigravity-tools-lite.rb"
-brew style --cask local/antigravity-tools-lite/antigravity-tools-lite
-brew audit --cask local/antigravity-tools-lite/antigravity-tools-lite
-brew install --cask local/antigravity-tools-lite/antigravity-tools-lite
+brew tap anglee0323/agy-switch https://github.com/anglee0323/agy-switch.git
+brew install --cask anglee0323/agy-switch/agy-switch
 agy-switch --version
-agy-switch accounts list --json
-brew uninstall --cask local/antigravity-tools-lite/antigravity-tools-lite
 ```
 
-Review any Homebrew trust prompt yourself. `brew uninstall` retains saved accounts and OS credentials. No `zap` stanza deletes them. Test that upgrades preserve account files and that `agy-switch` follows a custom `--appdir`, then publish the verified cask under `Casks/` in an authorized tap. Only after publication should end-user installation instructions name that tap. See Homebrew's [tap maintenance guide](https://docs.brew.sh/How-to-Create-and-Maintain-a-Tap).
+The explicit repository URL is required because this project also serves as the tap. Homebrew installs `AntiGravity Switch.app` and links its management entry as `agy-switch`, including when a custom `--appdir` is used. The application is not launched during installation.
 
-## Signing and Gatekeeper
+If a manually installed copy already occupies the destination, keep a backup and review Homebrew's conflict message before proceeding. The cask does not force adoption or overwrite another installation.
 
-The v4.7.9 release uses complete ad-hoc bundle signing. The public ZIP extracted outside the Desktop and the Brew app installed in `/Applications` pass strict signature verification with empty entitlements. The initial Desktop test directory acquired Finder metadata and failed strict verification; the original archive was not altered to repair it. The release workflow does not configure Developer ID signing/notarization and does not disable quarantine/Gatekeeper. Homebrew installation does not remove that limitation. A distributable release needs appropriate signing/notarization or clearly documented user review of the ad-hoc signed app; do not add quarantine-removal commands to the cask. Confirm Apple trust behavior on a clean Mac before promoting installation instructions.
+## Install from the ZIP
 
-## Publish the cask in this repository
-
-A separate `homebrew-*` repository is optional. Homebrew's [two-argument tap form](https://docs.brew.sh/Taps) supports this existing Git repository. The root `Casks/antigravity-tools-lite.rb` is the exact generated v4.7.9 release attachment, with its immutable archive URL and real SHA-256. A release attachment alone is not a tap entry.
-
-Install from the repository with:
+Download `agy-switch-4.10.2-macos-arm64.zip` from the release page, unzip it, and move **AntiGravity Switch.app** into Applications. The archive also includes a console executable:
 
 ```sh
-brew tap anglee0323/antigravity-tools-lite https://github.com/anglee0323/antigravity-tools-lite.git
-brew install --cask anglee0323/antigravity-tools-lite/antigravity-tools-lite
-agy-switch --version
-agy-switch --help
+"/Applications/AntiGravity Switch.app/Contents/MacOS/agy-switch"
 ```
 
-The explicit Git URL matters: the one-argument `brew tap` form would look for a different, `homebrew-`-prefixed repository. The cask's `app` artifact installs the app, and its `binary` artifact links the bundled executable as `$(brew --prefix)/bin/agy-switch`, following a custom `--appdir`. It neither installs nor replaces Google's `agy`.
+This opens the terminal dashboard. Homebrew makes the same operations available through the shorter `agy-switch` command. See the [CLI guide](cli.md).
 
-Installation does not launch the app. If a manually installed app already occupies the destination, keep a backup and review Homebrew's conflict message before proceeding. These commands do not request forced overwrite, app adoption, account-data deletion or removal of platform trust checks.
-
-For later versions, publish the new ZIP first, generate and test the matching cask, then update the same root-level cask through a PR. Users can then run:
+## Upgrade
 
 ```sh
 brew update
-brew upgrade --cask anglee0323/antigravity-tools-lite/antigravity-tools-lite
+brew upgrade --cask anglee0323/agy-switch/agy-switch
 ```
 
-Use the [release checklist](release-checklist.md) to keep the source commit, version, assets and installation evidence aligned.
+For a manual installation, check for updates in the app or download the new ZIP. From 4.9.1, the app opens the release page before downloading when the current Mac installation fails system trust checks. Install the new ZIP manually in that case. Developer ID signing and notarization are not configured, so fully unattended installation is unavailable; the installed copy is preserved. Homebrew users should use `brew upgrade` to keep the receipt aligned with the installed version.
+
+Saved accounts and preferences live outside the application bundle in `~/.antigravity_tools`. Ordinary upgrades and cask removal retain them; the cask has no `zap` rule that deletes account data.
+
+## Verification and system trust
+
+The root recipe at `Casks/agy-switch.rb` pins the exact public ZIP and its SHA-256. Package hashes are listed in `release-manifest.json`; the update feed includes cryptographic package signatures. The Mac app has a complete ad-hoc resource signature but no Apple Developer ID or notarization. Gatekeeper can reject launch, and Homebrew does not bypass these checks.
+
+See [4.10.2 package verification](maintainers/4.10.2-public-acceptance.md) and [in-app updates](software-updates.md). Generating and publishing the cask is covered by the [maintainer release checklist](maintainers/release-checklist.md).

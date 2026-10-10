@@ -8,13 +8,23 @@ export interface ModelPricing {
 
 // Match the native menu estimator:
 // 1. Exact match (case/punctuation normalized) takes highest precedence (supports custom per-variant pricing).
-// 2. Canonical route fallback strips routing / tiering suffixes (-n, -tiered, -high, -medium, -low, -extra-low, -thinking)
-//    so that variants like gemini-3.8-flash-tiered and gemini-3.8-flash-n inherit their base model's pricing.
+// 2. Canonical route fallback strips routing / tiering suffixes (-n, -tiered, -high, -medium, -low, -extra-low)
+//    and maps Claude thinking and exp-a variants, so that variants inherit their base model's pricing.
 // 3. Independent architectures (e.g. flash-lite vs flash) do not conflate.
-const ROUTE_SUFFIX_REGEX = /-(n|tiered|high|medium|low|extra-low|thinking)$/i;
+const ROUTE_SUFFIX_REGEX = /-(n|tiered|high|medium|low|extra-low)$/i;
 
-const exactNormalize = (model: string) => model.toLowerCase().replace(/[^a-z0-9]/g, '');
-const canonicalNormalize = (model: string) => model.toLowerCase().replace(ROUTE_SUFFIX_REGEX, '').replace(/[^a-z0-9]/g, '');
+const exactNormalize = (model: string) => {
+    const name = model.toLowerCase();
+    const mapped = name === 'gemini-3.8-flash-exp-a' ? 'gemini-3.8-flash' : name;
+    return mapped.replace(/[^a-z0-9]/g, '');
+};
+
+const canonicalNormalize = (model: string) => {
+    let name = model.toLowerCase().trim().replace(ROUTE_SUFFIX_REGEX, '');
+    if (name === 'gemini-3.8-flash-exp-a') name = 'gemini-3.8-flash';
+    const cleaned = name.replace(/[^a-z0-9]/g, '');
+    return cleaned.replace(/^(claude(?:opus|sonnet|haiku)\d+)thinking$/, '$1');
+};
 
 export function findModelPricing(model: string, snapshot: { prices: ModelPricing[] } | null): ModelPricing | undefined {
     if (!snapshot || !model) return undefined;

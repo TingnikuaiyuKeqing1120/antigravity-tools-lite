@@ -1,18 +1,18 @@
 import { expect, test } from '@playwright/test';
-import { setupSettingsFixture } from './settings-fixture';
+import { settleKeyboardDrag, setupSettingsFixture } from './settings-fixture';
 test.beforeEach(async ({ page }, info) => {
   const failure = info.annotations.find(a => a.type === 'fixture-failure')?.description;
   await page.addInitScript(setupSettingsFixture, { failLoad: failure === 'general', failLowQuotaLoad: failure === 'low-quota' });
   await page.goto('/settings'); await expect(page.getByRole('tab', { name: '常规偏好', exact: true })).toHaveAttribute('aria-selected', 'true');
 });
-test('three retained panels preserve fields and localization is absent', async ({ page }) => {
-  expect(await page.getByRole('tab').allTextContents()).toEqual(['常规偏好', '配额与模型', '自定义模型', '智能切换策略']);
+test('five retained panels preserve fields and include experimental settings', async ({ page }) => {
+  expect(await page.getByRole('tab').allTextContents()).toEqual(['常规偏好', '配额与模型', '自定义模型', '智能切换策略', '实验功能']);
   for (const name of ['配额与模型', '自定义模型', '智能切换策略', '常规偏好']) {
     await page.getByRole('tab', { name, exact: true }).click(); await expect(page.getByRole('tabpanel')).toHaveCount(1); await expect(page.getByRole('tabpanel', { name, exact: true })).toBeVisible();
   }
   await expect(page.getByText('/synthetic/antigravity-tools', { exact: true })).toBeVisible();
   await expect(page.getByLabel('菜单栏聚合额度')).toBeEnabled();
-  await expect(page.getByText(/App 汉化|实验功能/)).toHaveCount(0);
+  await page.getByRole('tab', { name: '实验功能', exact: true }).click(); await expect(page.getByRole('switch', { name: '界面汉化' })).toBeVisible();
 });
 test('menu display preferences save partial patches and retain one quota window', async ({ page }) => {
   await expect(page.getByLabel('账号名称格式')).toHaveValue('email_then_label');
@@ -89,9 +89,9 @@ for (const failure of ['general', 'low-quota']) test(failure + ' load failure is
 });
 test('keyboard navigation wraps and mounted hidden panels stay outside the tab order', async ({ page }) => {
   await page.getByRole('tab').first().focus(); await page.keyboard.press('ArrowDown'); await expect(page.locator('#settings-tab-quota')).toBeFocused();
-  await page.keyboard.press('End'); await expect(page.locator('#settings-tab-autoSwitch')).toBeFocused();
+  await page.keyboard.press('End'); await expect(page.locator('#settings-tab-experimental')).toBeFocused();
   await page.setViewportSize({ width: 420, height: 600 }); await expect(page.getByRole('tablist')).toHaveAttribute('aria-orientation', 'horizontal');
-  await page.getByRole('tab').first().focus(); await page.keyboard.press('ArrowLeft'); await expect(page.locator('#settings-tab-autoSwitch')).toBeFocused(); await page.keyboard.press('Home'); await expect(page.locator('#settings-tab-general')).toBeFocused();
+  await page.getByRole('tab').first().focus(); await page.keyboard.press('ArrowLeft'); await expect(page.locator('#settings-tab-experimental')).toBeFocused(); await page.keyboard.press('Home'); await expect(page.locator('#settings-tab-general')).toBeFocused();
   await page.keyboard.press('Tab'); await expect(page.getByRole('tabpanel')).toBeFocused();
   for (let i = 0; i < 12; i++) { await page.keyboard.press('Tab'); expect(await page.evaluate(() => document.activeElement?.closest('[role="tabpanel"][hidden]') === null)).toBe(true); }
   await expect(page.locator('[role="tabpanel"][hidden]')).toHaveCount(3);
@@ -102,6 +102,17 @@ test('desktop preferences survive navigation and ordinary appearance saves', asy
   await page.locator('#settings-tab-quota').click(); await page.locator('#settings-tab-general').click(); await expect(login).toHaveAttribute('aria-checked', 'true'); await expect(dock).toHaveAttribute('aria-checked', 'true');
   await page.getByRole('button', { name: '深色', exact: true }).click(); await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
   expect(await page.evaluate(() => (window as any).__TAURI_INTERNALS__.invoke('load_config'))).toMatchObject({ desktop: { launch_at_login: true, hide_dock_icon: true, start_minimized: true } });
+});
+test('a delayed appearance save retains newer menu preferences in the visible editor', async ({ page }) => {
+  await page.evaluate(() => { (window as any).__settingsFixture.holdGeneralSave = true; });
+  await page.getByRole('button', { name: '深色', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).__settingsFixture.calls.filter((call: any) => call.command === 'save_config').length)).toBe(1);
+  await page.getByLabel('菜单栏聚合额度').selectOption('gemini');
+  await expect(page.getByLabel('菜单栏聚合额度')).toHaveValue('gemini');
+  await page.evaluate(() => { (window as any).__settingsFixture.resolveGeneralSave(); });
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  expect(await page.evaluate(() => (window as any).__TAURI_INTERNALS__.invoke('load_config'))).toMatchObject({ menu_bar: { quota_scope: 'gemini' } });
+  await expect(page.getByLabel('菜单栏聚合额度')).toHaveValue('gemini');
 });
 test('all categories and controls fit short bilingual windows; scrollers reset on navigation', async ({ page }, info) => {
   for (const language of ['zh', 'en']) {
@@ -125,8 +136,13 @@ test('candidate order supports keyboard dragging and survives saved navigation',
   await page.getByLabel('primary@example.invalid', { exact: true }).check();
   await page.getByLabel('backup@example.invalid', { exact: true }).check();
   await page.getByLabel('studio@example.invalid', { exact: true }).check();
+  await expect.poll(() => page.evaluate(() => (window as any).__settingsFixture.lowQuota().candidate_account_ids)).toEqual(['fixture-0', 'fixture-1', 'fixture-2']);
   const handle = page.getByRole('button', { name: '调整 primary@example.invalid 的顺序', exact: true });
-  await handle.focus(); await page.keyboard.press('Space'); await expect(handle).toHaveAttribute('aria-pressed', 'true'); await page.keyboard.press('ArrowDown'); await expect(page.locator('[role="status"]').filter({ hasText: '目标位置：backup@example.invalid' })).toBeVisible(); await page.keyboard.press('Space');
+  await handle.focus(); await page.keyboard.press('Space'); await expect(handle).toHaveAttribute('aria-pressed', 'true');
+  // The initial collision announcement confirms measured rows and an active sensor.
+  await expect(page.locator('[role="status"]').filter({ hasText: '目标位置：primary@example.invalid' })).toBeVisible();
+  await settleKeyboardDrag(page);
+  await page.keyboard.press('ArrowDown'); await expect(page.locator('[role="status"]').filter({ hasText: '目标位置：backup@example.invalid' })).toBeVisible(); await page.keyboard.press('Space');
   await expect.poll(() => page.evaluate(() => (window as any).__settingsFixture.lowQuota())).toMatchObject({ strategy: 'round_robin', candidate_account_ids: ['fixture-1', 'fixture-0', 'fixture-2'] });
   await page.locator('#settings-tab-general').click(); await page.locator('#settings-tab-autoSwitch').click();
   await expect(page.locator('[data-candidate-id]').first()).toHaveAttribute('data-candidate-id', 'fixture-1');
@@ -153,3 +169,10 @@ test('custom model modal fits short windows without top clipping and closes with
   await expect(title).not.toBeVisible();
 });
 
+test('language-change confirmation uses the selected language', async ({ page }) => {
+    await page.addInitScript({ content: `(${setupSettingsFixture.toString()})(${JSON.stringify({ language: 'zh' })});` });
+    await page.goto('/settings');
+    await page.getByRole('button', { name: 'English', exact: true }).click();
+    await expect(page.getByText('Settings saved', { exact: true })).toBeVisible();
+    await expect(page.getByText('设置已保存', { exact: true })).toHaveCount(0);
+});

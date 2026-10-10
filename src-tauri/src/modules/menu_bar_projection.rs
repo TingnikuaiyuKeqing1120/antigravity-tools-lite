@@ -1,6 +1,6 @@
 //! Credential-free native menu projection. Percentages are relative headroom,
 //! never token capacity; keep independent families/windows and fail closed.
-use super::account_dashboard::DashboardEntry;
+use super::account_dashboard::{DashboardEntry, DashboardSnapshot};
 use crate::models::config::MenuBarQuotaScope;
 use std::collections::HashMap;
 use crate::models::config::{MenuBarPreferences, MenuBarLabelStyle};
@@ -14,9 +14,40 @@ pub fn quota_tone(value: Option<f64>, preferences: &MenuBarPreferences) -> Quota
     }, _ => QuotaTone::Unknown }
 }
 pub fn visible_account(account: &DashboardEntry, preferences: &MenuBarPreferences, now: i64) -> bool {
-    !preferences.hide_unavailable || (account.read_status == "loaded" && !account.disabled
+    !preferences.hide_unavailable || switchable_account(account, now)
+}
+pub fn switchable_account(account: &DashboardEntry, now: i64) -> bool {
+    account.read_status == "loaded" && !account.disabled
         && !account.quota.as_ref().is_some_and(|quota| quota.is_forbidden)
-        && !(account.validation_blocked && account.validation_blocked_until.is_none_or(|until| until > now)))
+        && !(account.validation_blocked && account.validation_blocked_until.is_none_or(|until| until > now))
+}
+pub fn verified_current(id: &str, current: Option<&str>, source: &str) -> bool {
+    source == "running_app" && current == Some(id)
+}
+
+/// The fallback tray reads the saved selection, never live credentials. Keep its
+/// next action and cached quota consistent with the quick dashboard's guards.
+pub fn next_switchable_account(snapshot: &DashboardSnapshot, now: i64) -> Option<&DashboardEntry> {
+    let accounts: Vec<_> = snapshot.accounts.iter().filter(|account| switchable_account(account, now)).collect();
+    let current = snapshot.current_account_id.as_deref();
+    let next = accounts.iter().position(|account| Some(account.id.as_str()) == current)
+        .map(|index| (index + 1) % accounts.len()).unwrap_or(0);
+    accounts.get(next).copied().filter(|account| Some(account.id.as_str()) != current)
+}
+
+pub fn saved_quota_lines(account: Option<&DashboardEntry>, now: i64, freshness_minutes: i32, language: &str) -> Vec<String> {
+    let texts = super::i18n::get_tray_texts(language);
+    if let Some(account) = account {
+        if account.disabled { return vec![texts.disabled]; }
+        if account.validation_blocked && account.validation_blocked_until.is_none_or(|until| until > now) { return vec![texts.blocked]; }
+        if account.quota.as_ref().is_some_and(|quota| quota.is_forbidden) { return vec![texts.forbidden]; }
+        let windows = account_windows(account, now, freshness_minutes);
+        let periods = if language.starts_with("zh") { ["5 小时", "每周"] } else { ["5 hours", "Weekly"] };
+        return windows.iter().enumerate().flat_map(|(period, values)| values.iter().enumerate().map(move |(family, value)| {
+            format!("{}  {}: {}", if family == 0 { "Gemini" } else { "Claude / GPT" }, periods[period], percent(*value))
+        })).collect();
+    }
+    vec![format!("{}: {}", texts.quota, texts.unknown_quota)]
 }
 pub fn identity_parts(account: &DashboardEntry, preferences: &MenuBarPreferences) -> (String, String) {
     let note = account.custom_label.as_deref().unwrap_or("").trim();
@@ -25,6 +56,17 @@ pub fn identity_parts(account: &DashboardEntry, preferences: &MenuBarPreferences
         MenuBarLabelStyle::EmailThenLabel if !note.is_empty() && note != account.email => (account.email.clone(), note.into()),
         _ => (account.email.clone(), String::new()),
     }
+}
+
+/// Keep the account count visible while explaining a pending or failed identity
+/// observation. Unknown and ambiguous live emails must not look like success.
+pub fn account_heading_summary(count: usize, current: Option<&str>, source: &str, zh: bool) -> String {
+    let count = if zh { format!("{count} 个账号") } else { format!("{count} accounts") };
+    let texts = super::i18n::get_tray_texts(if zh { "zh" } else { "en" });
+    let status = if source == "checking" { texts.identity_checking }
+        else if source == "unavailable" || (source == "running_app" && current.is_none()) { texts.identity_unavailable }
+        else { return count; };
+    format!("{count}  {status}")
 }
 
 pub fn account_windows(account: &DashboardEntry, now: i64, freshness_minutes: i32) -> [[Option<f64>; 2]; 2] {
@@ -72,6 +114,14 @@ pub fn account_windows(account: &DashboardEntry, now: i64, freshness_minutes: i3
     result
 }
 
+/// Keep the tracked menu's row order fixed while applying newer local observations.
+/// A failed read, removed row or newly hidden account must not retain usable quota.
+pub fn open_menu_windows(snapshot: Option<&DashboardSnapshot>, ids: &[&str], preferences: &MenuBarPreferences, now: i64, freshness_minutes: i32) -> Vec<[[Option<f64>; 2]; 2]> {
+    ids.iter().map(|id| snapshot.and_then(|snapshot| snapshot.accounts.iter().find(|account| account.id == *id))
+        .filter(|account| visible_account(account, preferences, now))
+        .map(|account| account_windows(account, now, freshness_minutes)).unwrap_or([[None; 2]; 2])).collect()
+}
+
 pub fn aggregate(windows: &[[[Option<f64>; 2]; 2]], scope: MenuBarQuotaScope, period: usize, reserve: u8) -> (Option<f64>, usize, usize) {
     let families: &[usize] = match scope { MenuBarQuotaScope::All => &[0, 1], MenuBarQuotaScope::Gemini => &[0], MenuBarQuotaScope::Other => &[1] };
     let covered: Vec<_> = windows.iter().filter(|row| families.iter().all(|&family| row[period][family].is_some())).collect();
@@ -113,6 +163,14 @@ pub fn account_reset_labels(account: &DashboardEntry, now: i64, zh: bool) -> [[S
 mod tests {
     use super::*;
     use crate::modules::account_dashboard::{ReadOnlyQuota, ReadOnlyGroup, ReadOnlyBucket};
+    #[test] fn identity_heading_explains_failures_and_recovers_without_claiming_a_current_account() {
+        assert_eq!(account_heading_summary(5, None, "checking", true), "5 个账号  识别中");
+        assert_eq!(account_heading_summary(5, None, "unavailable", true), "5 个账号  当前未识别");
+        assert_eq!(account_heading_summary(5, None, "running_app", false), "5 accounts  Current unknown");
+        assert_eq!(account_heading_summary(5, Some("verified"), "running_app", false), "5 accounts");
+        assert_eq!(account_heading_summary(5, Some("saved"), "tools_record", true), "5 个账号");
+        assert_eq!(account_heading_summary(0, None, "tools_record", false), "0 accounts");
+    }
     fn account() -> DashboardEntry {
         let groups = ["Gemini", "Claude / GPT"].into_iter().enumerate().map(|(family, name)| ReadOnlyGroup {
             display_name: name.into(), buckets: ["5h", "weekly"].into_iter().map(|window| ReadOnlyBucket {
@@ -122,6 +180,48 @@ mod tests {
         DashboardEntry { id: "synthetic".into(), email: "test@example.invalid".into(), name: None, custom_label: None,
             read_status: "loaded", read_error: None, disabled: false, validation_blocked: false, validation_blocked_until: None, protected_models: vec![],
             quota: Some(ReadOnlyQuota { last_updated: 1_790_000_000, is_forbidden: false, subscription_tier: None, provenance: "observed", models: vec![], groups: Some(groups) }) }
+    }
+    #[test] fn saved_selection_never_claims_live_identity() {
+        for source in ["tools_record", "unavailable", "checking"] {
+            assert!(!verified_current("a", Some("a"), source));
+        }
+        assert!(verified_current("a", Some("a"), "running_app"));
+        assert!(!verified_current("b", Some("a"), "running_app"));
+        assert!(!verified_current("a", None, "running_app"));
+    }
+    #[test] fn fallback_quota_does_not_reuse_stale_or_unavailable_percentages() {
+        let now = 1_790_000_000;
+        let mut row = account();
+        assert_eq!(saved_quota_lines(Some(&row), now, 5, "en")[0], "Gemini  5 hours: 50%");
+        assert_eq!(saved_quota_lines(Some(&row), now, 5, "zh")[0], "Gemini  5 小时: 50%");
+        row.quota.as_mut().unwrap().last_updated = now - 301;
+        assert!(saved_quota_lines(Some(&row), now, 5, "en").iter().all(|line| line.ends_with('—')));
+        row.quota.as_mut().unwrap().last_updated = now;
+        row.protected_models.push("Gemini".into());
+        assert!(saved_quota_lines(Some(&row), now, 5, "zh").iter().all(|line| line.ends_with('—')));
+        row.disabled = true;
+        assert_eq!(saved_quota_lines(Some(&row), now, 5, "en"), ["Account disabled"]);
+        row.disabled = false; row.validation_blocked = true;
+        assert_eq!(saved_quota_lines(Some(&row), now, 5, "zh"), ["账号需要验证"]);
+        row.validation_blocked_until = Some(now);
+        row.quota.as_mut().unwrap().is_forbidden = true;
+        assert_eq!(saved_quota_lines(Some(&row), now, 5, "en"), ["Account rejected (403)"]);
+        assert_eq!(saved_quota_lines(None, now, 5, "en"), ["Quota: Unknown (Refresh needed)"]);
+    }
+    #[test] fn fallback_next_account_keeps_order_and_recovers_from_an_ineligible_selection() {
+        let now = 1_790_000_000;
+        let mut selected = account(); selected.id = "selected".into();
+        let mut expired = account(); expired.id = "expired".into(); expired.validation_blocked = true; expired.validation_blocked_until = Some(now);
+        let mut denied = account(); denied.id = "denied".into(); denied.quota.as_mut().unwrap().is_forbidden = true;
+        let mut view = DashboardSnapshot { indexed_total: 3, loaded_count: 3, failed_count: 0, current_account_id: Some(selected.id.clone()),
+            current_identity_source: "tools_record", accounts: vec![selected, denied, expired] };
+        assert_eq!(next_switchable_account(&view, now).unwrap().id, "expired");
+        view.accounts[0].disabled = true;
+        // One eligible backup is sufficient when the selected account is disabled.
+        assert_eq!(next_switchable_account(&view, now).unwrap().id, "expired");
+        view.current_account_id = Some("expired".into());
+        assert!(next_switchable_account(&view, now).is_none());
+        view.accounts.clear(); assert!(next_switchable_account(&view, now).is_none());
     }
     #[test] fn quota_colors_include_both_boundaries_in_yellow() {
         let preferences = MenuBarPreferences::default();
@@ -213,5 +313,50 @@ mod tests {
         assert_eq!(aggregate(&windows, MenuBarQuotaScope::Gemini, 1, 10), (Some(50.0), 1, 2));
         assert_eq!(aggregate(&windows, MenuBarQuotaScope::Other, 0, 10), (Some(50.0), 2, 2));
         assert_eq!(percent(Some(0.02)), "0%"); assert_eq!(percent(Some(99.6)), "100%"); assert_eq!(percent(None), "—");
+    }
+    #[test] fn open_menu_recovers_from_stale_cache_without_reopening_or_reordering() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("accounts")).unwrap();
+        let now = 1_790_000_000;
+        let preferences = MenuBarPreferences::default();
+        let ids = ["current", "backup"];
+        // Disk order differs from the open menu; credentials are not needed by this reader.
+        std::fs::write(dir.path().join("accounts.json"), serde_json::json!({
+            "version":"2.0", "current_account_id":"current", "accounts": ids.iter().rev().map(|id|
+                serde_json::json!({"id":id,"email":format!("{id}@example.invalid"),"created_at":1,"last_used":1})).collect::<Vec<_>>()
+        }).to_string()).unwrap();
+        let save = |id: &str, updated: i64, fraction: f64| {
+            std::fs::write(dir.path().join(format!("accounts/{id}.json")), serde_json::json!({
+                "id":id,"email":format!("{id}@example.invalid"),"quota":{"models":[],"last_updated":updated,
+                    "quota_groups":(["Gemini","Claude / GPT"].iter().enumerate().map(|(family, name)| serde_json::json!({
+                        "display_name":name,"buckets":(["5h","weekly"].iter().map(|window| serde_json::json!({
+                            "bucket_id":format!("pool-{family}"),"window":window,"remaining_fraction":fraction,
+                            "remaining_fraction_known":true,"reset_time":"2030-01-01T00:00:00Z"
+                        })).collect::<Vec<_>>())
+                    })).collect::<Vec<_>>())}
+            }).to_string()).unwrap();
+        };
+        save("current", now, 0.8); save("backup", now - 1800, 0.4);
+        let snapshot = super::super::account_dashboard::snapshot_in_dir(dir.path()).unwrap();
+        let before = open_menu_windows(Some(&snapshot), &ids, &preferences, now, 5);
+        assert_eq!(before, vec![[[Some(80.0); 2]; 2], [[None; 2]; 2]]);
+        assert_eq!(aggregate(&before, MenuBarQuotaScope::All, 0, 10), (Some(80.0), 1, 1));
+        save("backup", now, 0.4);
+        let snapshot = super::super::account_dashboard::snapshot_in_dir(dir.path()).unwrap();
+        let after = open_menu_windows(Some(&snapshot), &ids, &preferences, now, 5);
+        assert_eq!(after, vec![[[Some(80.0); 2]; 2], [[Some(40.0); 2]; 2]]);
+        for period in 0..2 { assert_eq!(aggregate(&after, MenuBarQuotaScope::All, period, 10), (Some(60.0), 2, 2)); }
+        assert_eq!(open_menu_windows(Some(&snapshot), &ids, &preferences, now + 301, 5), vec![[[None; 2]; 2]; 2]);
+    }
+    #[test] fn open_menu_clears_failed_removed_and_newly_unavailable_observations() {
+        let mut snapshot = DashboardSnapshot { indexed_total: 1, loaded_count: 1, failed_count: 0,
+            current_account_id: None, current_identity_source: "tools_record", accounts: vec![account()] };
+        let ids = ["synthetic", "removed"];
+        let preferences = MenuBarPreferences::default();
+        assert_eq!(open_menu_windows(None, &ids, &preferences, 1_790_000_000, 15), vec![[[None; 2]; 2]; 2]);
+        snapshot.accounts[0].disabled = true;
+        let windows = open_menu_windows(Some(&snapshot), &ids, &preferences, 1_790_000_000, 15);
+        assert_eq!(windows, vec![[[None; 2]; 2]; 2]);
+        assert_eq!(aggregate(&windows, MenuBarQuotaScope::All, 0, 10), (None, 0, 0));
     }
 }

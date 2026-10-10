@@ -57,7 +57,7 @@ pub fn project(summary: &LocalTokenUsageSummary, pricing: Option<&ApiPricingSnap
 
 fn strip_route_suffix(model: &str) -> &str {
     let m = model.trim();
-    for suffix in ["-n", "-tiered", "-high", "-medium", "-low", "-extra-low", "-thinking"] {
+    for suffix in ["-n", "-tiered", "-high", "-medium", "-low", "-extra-low"] {
         if let Some(stripped) = m.strip_suffix(suffix) {
             return stripped;
         }
@@ -67,11 +67,22 @@ fn strip_route_suffix(model: &str) -> &str {
 
 fn canonical_model_key(model: &str) -> String {
     let model = model.to_ascii_lowercase();
-    strip_route_suffix(&model).chars().filter(|c| c.is_ascii_alphanumeric()).collect()
+    let model = strip_route_suffix(&model);
+    let model = if model == "gemini-3.8-flash-exp-a" { "gemini-3.8-flash" } else { model };
+    let name: String = model.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    if let Some(base) = name.strip_suffix("thinking") {
+        if ["claudeopus", "claudesonnet", "claudehaiku"].iter().any(|prefix|
+            base.strip_prefix(prefix).is_some_and(|version| !version.is_empty() && version.chars().all(|c| c.is_ascii_digit()))) {
+            return base.to_string();
+        }
+    }
+    name
 }
 
 fn exact_model_key(model: &str) -> String {
-    model.to_ascii_lowercase().chars().filter(|c| c.is_ascii_alphanumeric()).collect()
+    let model = model.to_ascii_lowercase();
+    let model = if model == "gemini-3.8-flash-exp-a" { "gemini-3.8-flash" } else { &model };
+    model.chars().filter(|c| c.is_ascii_alphanumeric()).collect()
 }
 
 pub(crate) fn estimate(models: &[LocalTokenModel], prices: &[ApiPricing]) -> (Option<f64>, usize) {
@@ -121,6 +132,25 @@ mod tests {
     fn native_alias_and_three_token_components_use_the_same_rate() {
         let (usd, missing) = estimate(&[model("gemini-3.8-flash-n")], &[price()]);
         assert!((usd.unwrap() - 1.275).abs() < 1e-9); assert_eq!(missing, 0);
+    }
+    #[test]
+    fn explicit_experimental_alias_preserves_version_and_variant_boundaries() {
+        let (usd, missing) = estimate(&[model("GEMINI-3.8-FLASH-EXP-A")], &[price()]);
+        assert!((usd.unwrap() - 1.275).abs() < 1e-9); assert_eq!(missing, 0);
+        for name in ["gemini-3.8-flash-exp-b", "gemini-3.7-flash", "gemini-3.8-flash-lite"] {
+            assert_eq!(estimate(&[model(name)], &[price()]), (None, 1));
+        }
+    }
+    #[test]
+    fn claude_thinking_alias_uses_exact_input_output_and_cache_rates() {
+        let price = ApiPricing { model: "Claude Opus 4.6".into(), input: 5.0, output: 25.0, cached: 0.5 };
+        for name in ["claude-opus-4-6-thinking", "Claude Opus 4.6 Thinking-n", "claude-opus-4.6"] {
+            assert_eq!(estimate(&[model(name)], &[price.clone()]), (Some(8.5), 0));
+        }
+        for name in ["claude-opus-4-5-thinking", "claude-opus-4-6-fast", "claude-opus-4-6-thinking-exp", "claude-sonnet-4-6-thinking"] {
+            assert_eq!(estimate(&[model(name)], &[price.clone()]), (None, 1));
+        }
+        assert_eq!(estimate(&[model("claude-opus-4-6-thinking")], &[price.clone(), price]), (None, 1));
     }
     #[test]
     fn unknown_and_ambiguous_models_are_not_free() {

@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main, codex/cli-homebrew]
+    branches: [main]
 
 permissions:
   contents: read
@@ -48,7 +48,10 @@ jobs:
         run: npm run build
 
       - name: Test menu-bar quota presentation
-        run: node scripts/test-menubar-logic.mjs && node scripts/test-menubar-overview.mjs && node scripts/test-account-dashboard.mjs && node scripts/test-model-pricing.mjs
+        run: node scripts/test-menubar-logic.mjs && node scripts/test-menubar-overview.mjs && node scripts/test-account-dashboard.mjs && node scripts/test-dashboard-overview.mjs && node scripts/test-model-pricing.mjs
+
+      - name: Test brand metadata and release names
+        run: node --test scripts/test-branding.mjs
 
       - name: Test settings category component contracts
         run: node scripts/test-settings-layout.mjs
@@ -82,6 +85,12 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          shared-key: native-platform-build-${{ matrix.platform }}
+          cache-on-failure: true
+
       - name: Test CLI child-process stdio isolation
         run: node scripts/test-cli-launch.mjs
 
@@ -91,8 +100,26 @@ jobs:
       - name: Test read-only account dashboard contract
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib account_dashboard::tests
 
+      - name: Test native background schedules and coalescing
+        run: |
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib quota_refresh::tests
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib account_sync::tests
+
+      - name: Test menu-bar quota snapshots
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib menu_bar_projection::tests
+
+      - name: Test official price parsing and native cost matching
+        run: |
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib api_pricing::tests
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib menu_bar_usage::tests
+
+      - name: Test local usage and response performance
+        run: "cargo test --locked --manifest-path src-tauri/Cargo.toml --lib native_token_stats::"
+
       - name: Test App identity and metadata guards
-        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib app_
+        run: |
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib app_
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib agent_activity::tests
 
       - name: Test public release metadata guards
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib modules::updater::tests
@@ -100,25 +127,72 @@ jobs:
       - name: Test serialized desktop preferences
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib modules::config::tests
 
-      - name: Test Tools Lite CLI on every platform
+      - name: Test agy-switch CLI on every platform
         run: "cargo test --locked --manifest-path src-tauri/Cargo.toml --lib cli::"
 
       - name: Build executable for headless CLI smoke test
-        run: cargo build --locked --manifest-path src-tauri/Cargo.toml
+        run: cargo build --locked --manifest-path src-tauri/Cargo.toml --features native-gui-test
 
       - name: Smoke test CLI without a display or real credentials
         shell: bash
         run: |
-          BINARY=src-tauri/target/debug/antigravity-tools
+          BINARY=src-tauri/target/debug/agy-switch-desktop
           if [[ "$RUNNER_OS" == Windows ]]; then BINARY="${BINARY}.exe"; fi
           node scripts/test-cli.mjs "$BINARY"
 
+      - name: Smoke test dedicated console CLI
+        shell: bash
+        run: |
+          BINARY=src-tauri/target/debug/agy-switch
+          if [[ "$RUNNER_OS" == Windows ]]; then BINARY="${BINARY}.exe"; fi
+          node scripts/test-cli.mjs "$BINARY"
+
+      - name: Test interactive CLI in a real terminal
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          BINARY=src-tauri/target/debug/agy-switch
+          if [[ "$RUNNER_OS" == Windows ]]; then BINARY="$BINARY.exe"; fi
+          node scripts/test-cli-terminal.mjs "$BINARY"
+
       - name: Validate native GUI fixture and screenshot checks
-        run: node scripts/test-native-gui.mjs --self-test
+        run: |
+          node scripts/test-native-gui.mjs --self-test
+          node scripts/test-desktop-lifecycle.mjs --self-test
 
       - name: Install official native GUI test tools (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get install -y webkit2gtk-driver xvfb dbus-x11 fonts-noto-cjk
+        run: sudo apt-get install -y webkit2gtk-driver xvfb dbus-x11 fonts-noto-cjk openbox gdb
+
+      - name: Test actual macOS Dock and window lifecycle
+        if: runner.os == 'macOS'
+        timeout-minutes: 5
+        run: node scripts/test-macos-desktop.mjs
+
+      - name: Test actual Linux tray and secondary-window lifecycle
+        if: runner.os == 'Linux'
+        timeout-minutes: 5
+        env:
+          SOURCE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: xvfb-run -a -s "-screen 0 1280x1024x24 -nolisten tcp" dbus-run-session -- sh -c 'openbox >/tmp/agy-lifecycle-window-manager.log 2>&1 & node scripts/test-desktop-lifecycle.mjs'
+
+      - name: Test actual Windows tray and secondary-window lifecycle
+        if: runner.os == 'Windows'
+        timeout-minutes: 5
+        env:
+          SOURCE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: node scripts/test-desktop-lifecycle.mjs
+
+      - name: Upload native desktop lifecycle evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-lifecycle-${{ runner.os }}-${{ github.event.pull_request.head.sha || github.sha }}
+          path: |
+            artifacts/desktop-lifecycle/
+            artifacts/macos-desktop/
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Install pinned official Tauri WebDriver
         if: runner.os != 'macOS'
@@ -134,14 +208,15 @@ jobs:
         timeout-minutes: 5
         env:
           SOURCE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: xvfb-run -a -s "-screen 0 1280x1024x24 -nolisten tcp" dbus-run-session -- node scripts/test-native-gui.mjs src-tauri/target/debug/antigravity-tools
+        run: xvfb-run -a -s "-screen 0 1280x1024x24 -nolisten tcp" dbus-run-session -- node scripts/test-native-gui.mjs src-tauri/target/debug/agy-switch-desktop
 
-      - name: Check Windows native GUI compatibility and test when supported
+      - name: Test actual Windows Tauri window with isolated synthetic data
         if: runner.os == 'Windows'
         timeout-minutes: 5
         env:
           SOURCE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: node scripts/test-native-gui.mjs src-tauri/target/debug/antigravity-tools.exe
+          NATIVE_GUI_TEST_FEATURE: '1'
+        run: node scripts/test-native-gui.mjs src-tauri/target/debug/agy-switch-desktop.exe
 
       - name: Upload native GUI evidence (never substitute mock screenshots)
         if: runner.os != 'macOS' && always()
@@ -154,7 +229,7 @@ jobs:
 
       - name: Test Homebrew cask generation
         if: runner.os != 'Windows'
-        run: node --test scripts/test-homebrew-generator.mjs scripts/test-release.mjs
+        run: node --test scripts/test-homebrew-generator.mjs scripts/test-release.mjs scripts/test-update-assets.mjs
 
       - name: Test safe low-quota switching on every platform
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib auto_switch::tests
@@ -169,11 +244,11 @@ jobs:
         run: |
           set -euo pipefail
           npm run tauri bundle -- --debug --bundles app
-          APP="src-tauri/target/debug/bundle/macos/Antigravity Tools Lite.app"
-          [[ "$(lipo -archs "$APP/Contents/MacOS/antigravity-tools")" == "arm64" ]]
-          node scripts/test-cli.mjs "$APP/Contents/MacOS/antigravity-tools"
+          APP="src-tauri/target/debug/bundle/macos/agy-switch.app"
+          [[ "$(lipo -archs "$APP/Contents/MacOS/agy-switch-desktop")" == "arm64" ]]
+          node scripts/test-cli.mjs "$APP/Contents/MacOS/agy-switch-desktop"
           mkdir -p artifacts/macos-test
-          ARCHIVE="artifacts/macos-test/Antigravity-Tools-Lite-test-${SOURCE_HEAD}-macos-arm64.zip"
+          ARCHIVE="artifacts/macos-test/agy-switch-test-${SOURCE_HEAD}-macos-arm64.zip"
           ditto -c -k --sequesterRsrc --keepParent "$APP" "$ARCHIVE"
           shasum -a 256 "$ARCHIVE" > "$ARCHIVE.sha256"
           node --input-type=module -e 'import { writeFileSync } from "node:fs"; import { execFileSync } from "node:child_process"; writeFileSync("artifacts/macos-test/build-info.json", JSON.stringify({ source_head: process.env.SOURCE_HEAD, checkout_commit: execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(), run_id: process.env.GITHUB_RUN_ID, architecture: "arm64", profile: "debug", distribution: "CI test build; not a signed or notarized release" }, null, 2) + "\n");'

@@ -51,6 +51,13 @@ pub async fn set_menu_bar_preferences(
     Ok(preferences)
 }
 
+/// Save dashboard card selection and order without overwriting other settings.
+#[tauri::command]
+pub async fn set_dashboard_cards(cards: Vec<String>, order: Option<Vec<String>>) -> Result<crate::models::config::DashboardPreferences, String> {
+    tokio::task::spawn_blocking(move || modules::config::set_dashboard_cards(cards, order))
+        .await.map_err(|error| error.to_string())?
+}
+
 /// 添加账号
 #[tauri::command]
 pub async fn add_account(
@@ -375,6 +382,10 @@ pub async fn import_custom_db(app: tauri::AppHandle, path: String) -> Result<Acc
 
 #[tauri::command]
 pub async fn sync_account_from_db(app: tauri::AppHandle) -> Result<Option<Account>, String> {
+    modules::account_sync::synchronize(app).await
+}
+
+pub(crate) async fn sync_account_from_db_internal(app: tauri::AppHandle) -> Result<Option<Account>, String> {
     // Serialize the observation and index update with real credential switches.
     let _switch_guard = crate::cli::SwitchLock::acquire(&modules::account::get_data_dir()?)?;
     // Check if the current target is one we should not sync (like agy CLI)
@@ -416,11 +427,12 @@ pub async fn sync_account_from_db(app: tauri::AppHandle) -> Result<Option<Accoun
     // 既然是从数据库导入，自动将其设为 Manager 的当前账号并保留当前 target
     let account_id = account.id.clone();
     modules::account::set_current_account_id_with_target(&account_id, current_target)?;
-    modules::logger::log_info(if from_live_app {
-        "Current account synchronized from running App identity"
-    } else {
-        "Current account synchronized from exact observed credential"
-    });
+    tracing::info!(
+        previous_account_id = current.as_ref().map(|account| account.id.as_str()).unwrap_or("none"),
+        current_account_id = account_id.as_str(),
+        observation = if from_live_app { "running_app" } else { "observed_credential" },
+        "Current account record synchronized; client credentials unchanged"
+    );
 
     // 自动触发刷新额度
     let _ = internal_refresh_account_quota(&app, &mut account).await;
@@ -635,3 +647,10 @@ pub async fn get_custom_pricing_file_path() -> Result<String, String> {
     crate::modules::api_pricing::get_custom_pricing_file_path()
 }
 
+#[tauri::command]
+pub fn get_running_version() -> String { env!("CARGO_PKG_VERSION").into() }
+
+#[tauri::command]
+pub async fn download_and_install_update(app: tauri::AppHandle, expected_version: String, progress: tauri::ipc::Channel<crate::modules::updater::UpdateProgress>) -> Result<(), String> {
+    crate::modules::updater::download_and_install(app, expected_version, progress).await
+}

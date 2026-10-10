@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { ArrowLeftRight, Gauge, Settings, Sparkles } from 'lucide-react';
+import { ArrowLeftRight, FlaskConical, Gauge, Settings, Sparkles } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 export const SETTINGS_SECTIONS = [
@@ -7,6 +7,7 @@ export const SETTINGS_SECTIONS = [
     { id: 'quota', title: 'settings_sections.quota', description: 'settings_sections.quota_description', icon: Gauge },
     { id: 'customModels', title: 'settings_sections.custom_models', description: 'settings_sections.custom_models_description', icon: Sparkles },
     { id: 'autoSwitch', title: 'settings_sections.auto_switch', description: 'settings_sections.auto_switch_description', icon: ArrowLeftRight },
+    { id: 'experimental', title: 'settings_sections.experimental', description: 'settings_sections.experimental_description', icon: FlaskConical },
 ] as const;
 export type SettingsSection = typeof SETTINGS_SECTIONS[number]['id'];
 

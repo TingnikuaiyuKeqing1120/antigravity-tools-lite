@@ -1,0 +1,22 @@
+# Generated from a release archive; do not replace SHA-256 with :no_check.
+cask "agy-switch" do
+  version "@VERSION@"
+  sha256 "@SHA256@"
+
+  url "@URL@"
+  name "@APP_NAME@"
+  desc "Antigravity account manager, local usage dashboard and agy-switch CLI"
+  homepage "https://github.com/anglee0323/agy-switch"
+
+  depends_on arch: :arm64
+  depends_on :macos
+
+  app "@APP_NAME@.app"
+  binary "#{appdir}/@APP_NAME@.app/Contents/MacOS/@EXECUTABLE@", target: "agy-switch"
+
+  caveats <<~EOS
+    Includes the agy-switch command. Run agy-switch --help to get started.
+    This management CLI is separate from Google's agy command.
+    Account data and system credentials are retained when uninstalling.
+  EOS
+end

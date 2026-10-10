@@ -1,4 +1,4 @@
-//! Opt-in low-quota scheduling. This module never stops, kills, or starts a client.
+//! Opt-in low-quota scheduling with live task guards before client shutdown.
 //! A process scan is a conservative observation, not an atomic global idle barrier.
 use crate::models::{Account, QuotaData};
 use crate::modules::{account, cli_credentials, db, device, integration, version};
@@ -75,7 +75,7 @@ impl Default for Config {
     }
 }
 impl Config {
-    fn validate(&self) -> Result<(), String> {
+    pub(crate) fn validate(&self) -> Result<(), String> {
         if !(1..=98).contains(&self.reserve_percentage)
             || self.candidate_min_percentage <= self.reserve_percentage
             || self.candidate_min_percentage > 100
@@ -148,12 +148,20 @@ impl Status {
     }
 }
 #[derive(Clone, Debug)]
+struct RestartPlan {
+    app: bool,
+    ide: bool,
+    hubs: Vec<crate::modules::app_hub::Hub>,
+}
+
+#[derive(Clone, Debug)]
 struct Pending {
     id: String,
     source_id: String,
     target_id: String,
     revision: u64,
     closed_since: Option<i64>,
+    restart: Option<RestartPlan>,
 }
 #[derive(Default)]
 struct RuntimeData {
@@ -189,18 +197,26 @@ fn write_pause(source_id: Option<String>, failed: bool) -> Result<(), String> {
     .map_err(|_| "Cannot save switch state.".into())
 }
 fn read_pause() -> Result<PauseRecord, String> {
-    match std::fs::read(account::get_data_dir()?.join("auto_switch_state.json")) {
+    read_pause_at(&account::get_data_dir()?)
+}
+fn read_pause_at(root: &std::path::Path) -> Result<PauseRecord, String> {
+    match std::fs::read(root.join("auto_switch_state.json")) {
         Ok(bytes) => serde_json::from_slice(&bytes).map_err(|_| "Cannot read switch state.".into()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(PauseRecord::default()),
         Err(_) => Err("Cannot read switch state.".into()),
     }
 }
 
+#[cfg(test)]
 fn config_path() -> Result<std::path::PathBuf, String> {
     Ok(account::get_data_dir()?.join(CONFIG_FILE))
 }
 fn read_config() -> Result<Config, String> {
-    match std::fs::read(config_path()?) {
+    read_config_at(&account::get_data_dir()?)
+}
+/// CLI reads must not create the data directory or initialize the desktop runtime.
+pub(crate) fn read_config_at(root: &std::path::Path) -> Result<Config, String> {
+    match std::fs::read(root.join(CONFIG_FILE)) {
         Ok(bytes) => {
             let c: Config = serde_json::from_slice(&bytes)
                 .map_err(|_| "Cannot read auto-switch settings.".to_string())?;
@@ -210,6 +226,59 @@ fn read_config() -> Result<Config, String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
         Err(_) => Err("Cannot read auto-switch settings.".into()),
     }
+}
+
+/// Compare and replace under the same OS lock as credential commits. A stale editor
+/// must reload instead of silently overwriting settings saved by another client.
+pub(crate) fn save_config_at(root: &std::path::Path, expected: &Config, config: &Config) -> Result<(), String> {
+    config.validate()?;
+    let _switch = crate::cli::SwitchLock::acquire(root)?;
+    if read_config_at(root)? != *expected {
+        return Err("auto_switch_settings_changed".into());
+    }
+    let bytes = serde_json::to_vec_pretty(config).map_err(|_| "Cannot encode settings.")?;
+    crate::utils::fs::write_atomic(root.join(CONFIG_FILE), &bytes)
+        .map_err(|_| "Cannot save auto-switch settings.")?;
+    crate::utils::fs::write_atomic(root.join("auto_switch_state.json"),
+        &serde_json::to_vec(&PauseRecord::default()).map_err(|_| "Cannot encode switch state.")?)
+        .map_err(|_| "Cannot save switch state.".into())
+}
+
+fn apply_config(d: &mut RuntimeData, config: Config) {
+    d.config = config.clone();
+    d.revision += 1;
+    d.pending = None;
+    d.canceled_source = None;
+    d.refresh_after.clear();
+    d.refresh_failed.clear();
+    d.failed = false;
+    d.status = Status {
+        mode: config.mode,
+        phase: if config.enabled { "monitoring" } else { "disabled" }.into(),
+        ..Status::default()
+    };
+}
+
+fn sync_external_config(runtime: &Runtime) -> Result<(), String> {
+    sync_external_config_at(runtime, &account::get_data_dir()?)
+}
+fn sync_external_config_at(runtime: &Runtime, root: &std::path::Path) -> Result<(), String> {
+    let _settings = match crate::cli::SwitchLock::acquire(root) {
+        Ok(lock) => lock,
+        Err(e) if e == "another_account_switch_in_progress" => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let mut d = runtime.data.lock().map_err(|_| "Auto-switch state is unavailable.")?;
+    if d.commit_started { return Ok(()); }
+    let config = read_config_at(root)?;
+    if config != d.config {
+        let pause = read_pause_at(root)?;
+        apply_config(&mut d, config);
+        d.canceled_source = pause.source_id;
+        d.failed = pause.failed;
+        if d.failed { d.status.set("blocked", "switch_failed"); }
+    }
+    Ok(())
 }
 
 /// Known bucket IDs, rather than translated display labels, identify provider pools.
@@ -386,7 +455,9 @@ fn is_client_process(
     configured_paths: &[std::path::PathBuf],
 ) -> bool {
     let name = name.to_ascii_lowercase();
-    if name.starts_with("antigravity-tools") || name.starts_with("antigravity_tools") {
+    if name == "agy-switch" || name == "agy-switch.exe"
+        || name == "agy-switch-desktop" || name == "agy-switch-desktop.exe"
+        || name.starts_with("antigravity-tools") || name.starts_with("antigravity_tools") {
         return false;
     }
     if name.contains("antigravity") || name == "agy" || name == "agy.exe" {
@@ -554,12 +625,15 @@ fn advance_pending(
         .as_ref()
         .is_some_and(|p| p.source_id == source_id && p.target_id == target_id)
     {
+        let restart = d.pending.as_ref().filter(|p| p.source_id == source_id)
+            .and_then(|p| p.restart.clone());
         d.pending = Some(Pending {
             id: uuid::Uuid::new_v4().to_string(),
             source_id: source_id.into(),
             target_id: target_id.into(),
             revision: d.revision,
             closed_since: None,
+            restart,
         });
     }
     let p = d.pending.as_mut().unwrap();
@@ -618,56 +692,6 @@ fn commit_guard(
     }
 }
 
-pub fn is_any_agent_actively_working() -> bool {
-    #[cfg(test)]
-    {
-        return false;
-    }
-    #[cfg(not(test))]
-    {
-        let Some(home) = dirs::home_dir() else { return false; };
-        let candidates = [
-            home.join(".gemini/antigravity/brain"),
-            home.join(".gemini/antigravity-cli/brain"),
-        ];
-        let now = std::time::SystemTime::now();
-
-        for brain_dir in &candidates {
-            if !brain_dir.is_dir() {
-                continue;
-            }
-            let Ok(entries) = std::fs::read_dir(brain_dir) else { continue; };
-            for entry in entries.flatten() {
-                let p = entry.path().join(".system_generated/logs/transcript.jsonl");
-                if !p.is_file() {
-                    continue;
-                }
-                let Ok(meta) = p.metadata() else { continue; };
-                let Ok(mtime) = meta.modified() else { continue; };
-                let Ok(elapsed) = now.duration_since(mtime) else { continue; };
-
-                if elapsed.as_secs() < 8 {
-                    if let Ok(file) = std::fs::File::open(&p) {
-                        use std::io::{BufRead, BufReader, Seek, SeekFrom};
-                        let mut reader = BufReader::new(file);
-                        if let Ok(len) = reader.seek(SeekFrom::End(0)) {
-                            let offset = if len > 4096 { len - 4096 } else { 0 };
-                            let _ = reader.seek(SeekFrom::Start(offset));
-                            let lines: Vec<String> = reader.lines().flatten().collect();
-                            if let Some(last_line) = lines.iter().rev().find(|l| !l.trim().is_empty()) {
-                                if !last_line.contains("\"status\":\"DONE\"") {
-                                    return true;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        false
-    }
-}
-
 pub fn interrupt_vscode_agent() {
     #[cfg(all(target_os = "macos", not(test)))]
     {
@@ -689,8 +713,8 @@ pub fn interrupt_vscode_agent() {
 trait Environment: Clone + Send + Sync + 'static {
     fn now(&self) -> i64;
     fn clients(&self) -> ProcessState;
-    fn is_agent_working(&self) -> bool {
-        false
+    fn agent_activity(&self) -> crate::modules::agent_activity::Activity {
+        crate::modules::agent_activity::Activity::Unknown
     }
     fn interrupt_vscode(&self) {}
     fn is_client_running(&self, _target_ide: Option<&str>) -> bool {
@@ -702,6 +726,15 @@ trait Environment: Clone + Send + Sync + 'static {
     fn start_client(&self, _target_ide: Option<&str>) -> Result<(), String> {
         Ok(())
     }
+    fn restart_plan(&self, target: Target) -> Result<RestartPlan, &'static str> {
+        Ok(RestartPlan {
+            app: matches!(target, Target::App | Target::AppCli) && self.is_client_running(None),
+            ide: matches!(target, Target::App | Target::Ide) && self.is_client_running(Some("ide")),
+            hubs: vec![],
+        })
+    }
+    fn close_hubs(&self, _plan: &RestartPlan, _mode: Mode) -> Result<(), &'static str> { Ok(()) }
+    fn restart_hubs(&self, _plan: &RestartPlan) -> Result<(), String> { Ok(()) }
     fn fetch_quota<'a>(
         &'a self,
         account: &'a mut Account,
@@ -721,8 +754,8 @@ impl Environment for NativeEnvironment {
     fn clients(&self) -> ProcessState {
         clients()
     }
-    fn is_agent_working(&self) -> bool {
-        is_any_agent_actively_working()
+    fn agent_activity(&self) -> crate::modules::agent_activity::Activity {
+        crate::modules::agent_activity::running()
     }
     fn interrupt_vscode(&self) {
         interrupt_vscode_agent();
@@ -735,6 +768,21 @@ impl Environment for NativeEnvironment {
     }
     fn start_client(&self, target_ide: Option<&str>) -> Result<(), String> {
         crate::modules::process::start_antigravity(target_ide)
+    }
+    fn restart_plan(&self, target: Target) -> Result<RestartPlan, &'static str> {
+        Ok(RestartPlan {
+            app: matches!(target, Target::App | Target::AppCli) && self.is_client_running(None),
+            ide: matches!(target, Target::App | Target::Ide) && self.is_client_running(Some("ide")),
+            hubs: if matches!(target, Target::App | Target::AppCli) {
+                crate::modules::app_hub::snapshot()?
+            } else { vec![] },
+        })
+    }
+    fn close_hubs(&self, plan: &RestartPlan, mode: Mode) -> Result<(), &'static str> {
+        crate::modules::app_hub::close(&plan.hubs, mode == Mode::Wait)
+    }
+    fn restart_hubs(&self, plan: &RestartPlan) -> Result<(), String> {
+        crate::modules::app_hub::restart(&plan.hubs)
     }
     async fn fetch_quota(&self, account: &mut Account) -> Result<QuotaData, String> {
         account::fetch_quota_with_retry(account)
@@ -846,6 +894,7 @@ pub fn start(app: tauri::AppHandle) {
 }
 #[tauri::command]
 pub fn get_auto_switch_config(app: tauri::AppHandle) -> Result<Config, String> {
+    sync_external_config(&app.state::<Runtime>())?;
     Ok(app
         .state::<Runtime>()
         .data
@@ -879,27 +928,8 @@ pub fn set_auto_switch_config(app: tauri::AppHandle, mut config: Config) -> Resu
             return Err("A selected account no longer exists. Refresh the account list.".into());
         }
     }
-    let bytes = serde_json::to_vec_pretty(&config).map_err(|_| "Cannot encode settings.")?;
-    crate::utils::fs::write_atomic(&config_path()?, &bytes)
-        .map_err(|_| "Cannot save auto-switch settings.")?;
-    write_pause(None, false)?;
-    d.config = config.clone();
-    d.revision += 1;
-    d.pending = None;
-    d.canceled_source = None;
-    d.refresh_after.clear();
-    d.refresh_failed.clear();
-    d.failed = false;
-    d.status = Status {
-        mode: config.mode,
-        phase: if config.enabled {
-            "monitoring"
-        } else {
-            "disabled"
-        }
-        .into(),
-        ..Status::default()
-    };
+    save_config_at(&account::get_data_dir()?, &d.config, &config)?;
+    apply_config(&mut d, config.clone());
     Ok(config)
 }
 #[tauri::command]
@@ -1001,7 +1031,9 @@ async fn refresh<E: Environment>(
 fn update_status(runtime: &Runtime, revision: u64, status: Status) {
     if let Ok(mut d) = runtime.data.lock() {
         if d.revision == revision {
-            if status.phase == "blocked" {
+            let interrupted_close = d.pending.as_ref().is_some_and(|p| p.restart.is_some())
+                && matches!(status.reason.as_deref(), Some("process_unknown" | "client_close_failed" | "no_quota"));
+            if status.phase == "blocked" && !interrupted_close {
                 d.pending = None;
             }
             d.status = status;
@@ -1010,6 +1042,7 @@ fn update_status(runtime: &Runtime, revision: u64, status: Status) {
 }
 
 async fn evaluate(app: &tauri::AppHandle, force: bool) -> Result<(), String> {
+    sync_external_config(&app.state::<Runtime>())?;
     if evaluate_core(&app.state::<Runtime>(), NativeEnvironment, force).await? {
         let _ = app.emit("tray://account-switched", ());
         crate::modules::tray::update_tray_menus(app);
@@ -1168,24 +1201,30 @@ async fn evaluate_core<E: Environment>(
         return Ok(false);
     }
 
-    // In Mode::Wait, if agent is actively generating, wait for it to finish
-    if config.mode == Mode::Wait && environment.is_agent_working() {
-        let mut d = runtime.data.lock().map_err(|_| "State unavailable")?;
-        if d.revision == revision {
-            status.set("pending", "waiting_task_finish");
-            d.status = status;
+    if config.mode == Mode::Wait && process_state == ProcessState::Running {
+        let task_environment = environment.clone();
+        let activity = tokio::task::spawn_blocking(move || task_environment.agent_activity())
+            .await.unwrap_or(crate::modules::agent_activity::Activity::Unknown);
+        let reason = match activity {
+            crate::modules::agent_activity::Activity::Idle => None,
+            crate::modules::agent_activity::Activity::Busy => Some("waiting_task_finish"),
+            crate::modules::agent_activity::Activity::Unknown => Some("task_state_unknown"),
+        };
+        if let Some(reason) = reason {
+            status.set("pending", reason);
+            update_status(runtime, revision, status);
+            return Ok(false);
         }
-        return Ok(false);
     }
 
     // In VS Code mode: no client exit needed, hot-swap in place
     let is_vscode = config.target == Target::Vscode;
     if !is_vscode {
         if process_state != ProcessState::Closed {
-            status.set("pending", "clients_running");
+            status.set("pending", "closing_clients");
             update_status(runtime, revision, status.clone());
             // In automated mode, trigger close on running clients when safe:
-            if config.mode == Mode::Stop || (config.mode == Mode::Wait && !environment.is_agent_working()) {
+            if matches!(config.mode, Mode::Stop | Mode::Wait) {
                 let close_environment = environment.clone();
                 let close_data = runtime.data.clone();
                 let close_source = source.clone();
@@ -1204,8 +1243,9 @@ async fn evaluate_core<E: Environment>(
                     {
                         return Err("source_changed");
                     }
-                    {
-                        let d = close_data.lock().map_err(|_| "request_changed")?;
+                    let observed = close_environment.restart_plan(close_config.target)?;
+                    let plan = {
+                        let mut d = close_data.lock().map_err(|_| "request_changed")?;
                         if d.revision != revision
                             || d.pending.is_none()
                             || d.canceled_source.as_deref() == Some(close_source.id.as_str())
@@ -1213,15 +1253,32 @@ async fn evaluate_core<E: Environment>(
                         {
                             return Err("request_changed");
                         }
+                        // Capture before shutdown. At credential commit these
+                        // processes are intentionally gone; probing then loses
+                        // the information needed to reopen them.
+                        d.pending.as_mut().unwrap().restart.get_or_insert(observed).clone()
+                    };
+                    // The task can resume during identity/configuration checks.
+                    if close_config.mode == Mode::Wait {
+                        match close_environment.agent_activity() {
+                            crate::modules::agent_activity::Activity::Idle => {},
+                            crate::modules::agent_activity::Activity::Busy => return Err("waiting_task_finish"),
+                            crate::modules::agent_activity::Activity::Unknown => return Err("task_state_unknown"),
+                        }
                     }
                     close_environment
                         .close_client(20, close_config.target.argument())
-                        .map_err(|_| "clients_running")
+                        .map_err(|_| "client_close_failed")?;
+                    if close_config.target == Target::App && plan.ide {
+                        close_environment.close_client(20, Some("ide"))
+                            .map_err(|_| "client_close_failed")?;
+                    }
+                    close_environment.close_hubs(&plan, close_config.mode)
                 })
                 .await
                 .unwrap_or(Err("process_unknown"));
                 if let Err(reason) = checked_close {
-                    status.set("blocked", reason);
+                    status.set(if matches!(reason, "waiting_task_finish" | "task_state_unknown") { "pending" } else { "blocked" }, reason);
                     update_status(runtime, revision, status);
                 }
             }
@@ -1260,14 +1317,19 @@ async fn evaluate_core<E: Environment>(
         Ok(()) => {
             d.pending = None;
             d.status.pending_id = None;
-            let final_reason = if d.status.reason.as_deref() == Some("restarted") {
-                "restarted"
+            let final_reason = if matches!(d.status.reason.as_deref(), Some("restarted" | "restart_failed")) {
+                d.status.reason.clone().unwrap()
             } else if config.mode == Mode::Stop && config.target == Target::Vscode {
-                "paused_and_updated"
+                "paused_and_updated".into()
             } else {
-                "credentials_updated"
+                "credentials_updated".into()
             };
-            d.status.set("completed", final_reason);
+            d.status.set("completed", &final_reason);
+            tracing::info!(
+                source_account_id = source_id.as_str(), target_account_id = candidate.id.as_str(),
+                remaining_percentage = low, reserve_percentage = config.reserve_percentage,
+                "Automatic account switch completed"
+            );
             d.cooldown_until = now + COOLDOWN_SECONDS;
             if write_pause(d.canceled_source.clone(), false).is_err() {
                 d.failed = true;
@@ -1361,57 +1423,30 @@ impl<E: Environment> integration::SystemIntegration for AutoSwitchIntegration<E>
                 d.status.set("switching", "checking");
             }
 
-            // 1. Process detection and graceful close
-            let is_vscode = target_ide.as_deref() == Some("vscode");
-            let is_ide = target_ide.as_deref() == Some("ide");
-            let is_app = target_ide.as_deref() == Some("app");
-            let is_all = target_ide.is_none();
-
-            let app_running = if is_ide || is_vscode { false } else { environment.is_client_running(None) };
-            let ide_running = if is_app || is_vscode { false } else { environment.is_client_running(Some("ide")) };
-
-            if is_ide {
-                if ide_running {
-                    let _ = environment.close_client(20, Some("ide"));
-                }
-            } else if is_app {
-                if app_running {
-                    let _ = environment.close_client(20, None);
-                }
-            } else if is_all {
-                if app_running {
-                    let _ = environment.close_client(20, None);
-                }
-                if ide_running {
-                    let _ = environment.close_client(20, Some("ide"));
-                }
-            }
-
-            // 2. Write credentials
+            // Client exit was already verified by commit_guard. Retain the
+            // pre-close plan through the credential boundary and relaunch.
             environment.write_credentials(&latest_target, target_ide.as_deref())?;
-
-            // 3. Smart relaunch
-            if is_ide {
-                if ide_running {
-                    let _ = environment.start_client(Some("ide"));
+            let mut restarted = false;
+            let mut restart_failed = false;
+            if let Some(plan) = &p.restart {
+                if plan.app {
+                    restarted = true;
+                    restart_failed |= environment.start_client(None).is_err();
                 }
-            } else if is_app {
-                if app_running {
-                    let _ = environment.start_client(None);
+                if plan.ide {
+                    restarted = true;
+                    restart_failed |= environment.start_client(Some("ide")).is_err();
                 }
-            } else if is_all {
-                if app_running {
-                    let _ = environment.start_client(None);
-                }
-                if ide_running {
-                    let _ = environment.start_client(Some("ide"));
-                }
+                restarted |= !plan.hubs.is_empty();
+                restart_failed |= environment.restart_hubs(plan).is_err();
             }
 
             // 4. Update status in memory
             if let Ok(mut d) = data.lock() {
                 if d.revision == p.revision {
-                    let reason = if app_running || ide_running {
+                    let reason = if restart_failed {
+                        "restart_failed"
+                    } else if restarted {
                         "restarted"
                     } else {
                         "credentials_updated"
@@ -1751,6 +1786,9 @@ mod tests {
             Some(Path::new("/Applications/Antigravity.app/tools")),
             &[]
         ));
+        for name in ["agy-switch", "agy-switch.exe", "agy-switch-desktop", "agy-switch-desktop.exe"] {
+            assert!(!is_client_process(name, Some(Path::new("/Applications/Antigravity.app/tools")), &[]));
+        }
         assert!(!is_client_process(
             "bash",
             Some(Path::new("/bin/bash")),
@@ -1778,6 +1816,13 @@ mod tests {
         writes: Arc<std::sync::atomic::AtomicUsize>,
         source_checks: Arc<std::sync::atomic::AtomicUsize>,
         closes: Arc<std::sync::atomic::AtomicUsize>,
+        starts: Arc<std::sync::atomic::AtomicUsize>,
+        auto_close: Arc<std::sync::atomic::AtomicBool>,
+        fail_start: Arc<std::sync::atomic::AtomicBool>,
+        hub_present: Arc<std::sync::atomic::AtomicBool>,
+        hub_closes: Arc<std::sync::atomic::AtomicUsize>,
+        hub_starts: Arc<std::sync::atomic::AtomicUsize>,
+        activity: Arc<std::sync::atomic::AtomicU8>,
         fail_save: Arc<std::sync::atomic::AtomicBool>,
         low_backup: Arc<std::sync::atomic::AtomicBool>,
         fail_write: Arc<std::sync::atomic::AtomicBool>,
@@ -1791,6 +1836,13 @@ mod tests {
                 writes: Arc::default(),
                 source_checks: Arc::default(),
                 closes: Arc::default(),
+                starts: Arc::default(),
+                auto_close: Arc::default(),
+                fail_start: Arc::default(),
+                hub_present: Arc::default(),
+                hub_closes: Arc::default(),
+                hub_starts: Arc::default(),
+                activity: Arc::default(),
                 fail_save: Arc::default(),
                 low_backup: Arc::default(),
                 fail_write: Arc::default(),
@@ -1809,8 +1861,49 @@ mod tests {
                 _ => ProcessState::Unknown,
             }
         }
+        fn agent_activity(&self) -> crate::modules::agent_activity::Activity {
+            match self.activity.load(std::sync::atomic::Ordering::SeqCst) {
+                0 => crate::modules::agent_activity::Activity::Idle,
+                1 => crate::modules::agent_activity::Activity::Busy,
+                _ => crate::modules::agent_activity::Activity::Unknown,
+            }
+        }
         fn close_client(&self, _timeout: u64, _target_ide: Option<&str>) -> Result<(), String> {
             self.closes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.auto_close.load(std::sync::atomic::Ordering::SeqCst) {
+                self.process.store(0, std::sync::atomic::Ordering::SeqCst);
+            }
+            Ok(())
+        }
+        fn is_client_running(&self, target_ide: Option<&str>) -> bool {
+            target_ide.is_none() && self.process.load(std::sync::atomic::Ordering::SeqCst) == 1
+        }
+        fn start_client(&self, target_ide: Option<&str>) -> Result<(), String> {
+            assert!(target_ide.is_none());
+            assert_eq!(self.writes.load(std::sync::atomic::Ordering::SeqCst), 1);
+            self.starts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.fail_start.load(std::sync::atomic::Ordering::SeqCst) {
+                Err("injected relaunch failure".into())
+            } else { Ok(()) }
+        }
+        fn restart_plan(&self, target: Target) -> Result<RestartPlan, &'static str> {
+            Ok(RestartPlan {
+                app: matches!(target, Target::App | Target::AppCli) && self.is_client_running(None),
+                ide: false,
+                hubs: if self.hub_present.load(std::sync::atomic::Ordering::SeqCst) {
+                    vec![crate::modules::app_hub::fixture()]
+                } else { vec![] },
+            })
+        }
+        fn close_hubs(&self, plan: &RestartPlan, _mode: Mode) -> Result<(), &'static str> {
+            if !plan.hubs.is_empty() { self.hub_closes.fetch_add(1, std::sync::atomic::Ordering::SeqCst); }
+            Ok(())
+        }
+        fn restart_hubs(&self, plan: &RestartPlan) -> Result<(), String> {
+            if !plan.hubs.is_empty() {
+                assert_eq!(self.writes.load(std::sync::atomic::Ordering::SeqCst), 1);
+                self.hub_starts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
             Ok(())
         }
         async fn fetch_quota(&self, a: &mut Account) -> Result<QuotaData, String> {
@@ -1957,11 +2050,82 @@ mod tests {
                 assert_eq!(env.source_checks.load(SeqCst), 2);
                 assert_eq!(env.closes.load(SeqCst), 1);
                 assert_eq!(env.writes.load(SeqCst), 1);
+                assert_eq!(env.starts.load(SeqCst), 1);
                 assert_eq!(r.data.lock().unwrap().status.phase, "completed");
+                assert_eq!(r.data.lock().unwrap().status.reason.as_deref(), Some("restarted"));
                 assert!(!read_pause().unwrap().failed);
                 assert!(!evaluate_core(&r, env.clone(), false).await.unwrap());
                 assert_eq!(env.writes.load(SeqCst), 1);
             }
+            // A silent task, unknown state, and a task resumed during the final
+            // identity check all leave the real coordinator pending without close.
+            for activity in [1, 2] {
+                let r = fixture_setup(Mode::Wait);
+                let env = FixtureEnvironment::default();
+                env.activity.store(activity, SeqCst);
+                assert!(!evaluate_core(&r, env.clone(), false).await.unwrap());
+                assert_eq!(env.closes.load(SeqCst), 0);
+                assert_eq!(env.writes.load(SeqCst), 0);
+                assert_eq!(r.data.lock().unwrap().status.reason.as_deref(), Some(if activity == 1 { "waiting_task_finish" } else { "task_state_unknown" }));
+            }
+            let r = fixture_setup(Mode::Wait);
+            let env = FixtureEnvironment::default();
+            let resumed = env.activity.clone();
+            *env.on_verify.lock().unwrap() = Some(Box::new(move || { resumed.store(1, SeqCst); }));
+            assert!(!evaluate_core(&r, env.clone(), false).await.unwrap());
+            assert_eq!(env.closes.load(SeqCst), 0);
+            assert_eq!(r.data.lock().unwrap().status.reason.as_deref(), Some("waiting_task_finish"));
+
+            // Claude's quota triggers a pending switch while Gemini is still
+            // generating. When both conversations become idle, the production
+            // coordinator closes, commits and reopens without a manual exit.
+            for fail_start in [false, true] {
+                let r = fixture_setup(Mode::Wait);
+                for (id, remaining) in [("A", 0.08), ("B", 0.8)] {
+                    let mut account = account::load_account(id).unwrap();
+                    let mut q = quota(remaining, remaining);
+                    q.models[0].name = "claude-test".into();
+                    let mut value = serde_json::to_value(q).unwrap();
+                    value["quota_groups"][0]["buckets"][0]["bucket_id"] = "3p-weekly".into();
+                    value["quota_groups"][0]["buckets"][1]["bucket_id"] = "3p-5h".into();
+                    account.quota = Some(serde_json::from_value(value).unwrap());
+                    account::save_account(&account).unwrap();
+                }
+                {
+                    let mut d = r.data.lock().unwrap();
+                    d.config.monitored_model = "claude".into();
+                    crate::utils::fs::write_atomic(&config_path().unwrap(), &serde_json::to_vec(&d.config).unwrap()).unwrap();
+                }
+                let env = FixtureEnvironment::default();
+                env.auto_close.store(true, SeqCst);
+                env.fail_start.store(fail_start, SeqCst);
+                env.hub_present.store(true, SeqCst);
+                env.activity.store(1, SeqCst);
+                assert!(!evaluate_core(&r, env.clone(), false).await.unwrap());
+                let pending_id = r.data.lock().unwrap().status.pending_id.clone();
+                assert!(pending_id.is_some());
+                assert_eq!(r.data.lock().unwrap().status.reason.as_deref(), Some("waiting_task_finish"));
+                assert_eq!(env.closes.load(SeqCst), 0);
+                assert_eq!(env.writes.load(SeqCst), 0);
+                env.activity.store(0, SeqCst);
+                env.now.store(NOW + 5, SeqCst);
+                assert!(!evaluate_core(&r, env.clone(), false).await.unwrap());
+                assert_eq!(r.data.lock().unwrap().status.pending_id, pending_id);
+                assert_eq!(env.closes.load(SeqCst), 1);
+                assert_eq!(env.hub_closes.load(SeqCst), 1);
+                assert_eq!(env.starts.load(SeqCst), 0);
+                env.now.store(NOW + 10, SeqCst);
+                assert!(!evaluate_core(&r, env.clone(), false).await.unwrap());
+                env.now.store(NOW + 15, SeqCst);
+                assert!(evaluate_core(&r, env.clone(), false).await.unwrap());
+                assert_eq!(env.writes.load(SeqCst), 1);
+                assert_eq!(env.starts.load(SeqCst), 1);
+                assert_eq!(env.hub_starts.load(SeqCst), 1);
+                assert_eq!(account::get_current_account_id().unwrap().as_deref(), Some("B"));
+                assert_eq!(r.data.lock().unwrap().status.reason.as_deref(), Some(if fail_start { "restart_failed" } else { "restarted" }));
+                assert!(!read_pause().unwrap().failed);
+            }
+
             // Exercise production selection, including wraparound, configured priority,
             // an absent source, disabled candidates, and forbidden candidates.
             for (strategy, source, unavailable, expected) in [
@@ -2133,4 +2297,36 @@ mod tests {
         });
     }
 
+}
+
+#[cfg(test)]
+mod config_file_tests {
+    use super::*;
+    #[test]
+    fn external_edits_invalidate_pending_work_and_detect_stale_editors() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = Config::default();
+        let edited = Config { strategy: Strategy::RoundRobin, reserve_percentage: 15, ..original.clone() };
+        save_config_at(dir.path(), &original, &edited).unwrap();
+        assert!(save_config_at(dir.path(), &original, &original).is_err());
+        assert_eq!(read_config_at(dir.path()).unwrap(), edited);
+        let runtime = Runtime::default();
+        { let mut d = runtime.data.lock().unwrap(); d.failed = true; d.canceled_source = Some("fixture".into()); }
+        sync_external_config_at(&runtime, dir.path()).unwrap();
+        let d = runtime.data.lock().unwrap();
+        assert_eq!(d.config, edited); assert_eq!(d.revision, 1);
+        assert!(d.pending.is_none()); assert!(d.canceled_source.is_none()); assert!(!d.failed);
+    }
+    #[test]
+    fn settings_cannot_change_during_a_credential_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = crate::cli::SwitchLock::acquire(dir.path()).unwrap();
+        let edited = Config { reserve_percentage: 15, ..Config::default() };
+        assert_eq!(save_config_at(dir.path(), &Config::default(), &edited).unwrap_err(), "another_account_switch_in_progress");
+        assert!(!dir.path().join(CONFIG_FILE).exists()); drop(guard);
+        save_config_at(dir.path(), &Config::default(), &edited).unwrap();
+        let runtime = Runtime::default(); runtime.data.lock().unwrap().commit_started = true;
+        sync_external_config_at(&runtime, dir.path()).unwrap();
+        assert_eq!(runtime.data.lock().unwrap().config, Config::default());
+    }
 }
